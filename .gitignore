@@ -216,3 +216,39 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# FHI-aims source tree (user-provided, never publish)
+FHIaims250822_1/
+FHIaims*/
+# Patch drafts (test_patch.diff etc.) — kept locally as dev reference, not published
+test*.diff
+# Test patch drafts go here
+test_patch.diff
+
+# aimspy build artifacts
+*.mod
+build_*/
+binding/build/
+aimspy_build/
+# Compiled pybind11 extension (built per-user, never published)
+aimspy/_aims*.so
+aimspy/_aims*.pyd
+aimspy/**/*.so
+aimspy/**/*.pyd
+
+# Local patch working dirs
+_patch_work/
+
+# ---- v0.0 skeleton — kept in working dir for team alignment, not committed ----
+# These will be developed into v0.1+ by frontend / backend / test teams.
+aimspy/aims/
+aimspy/io/
+aimspy/patches/
+aimspy/patcher.py
+aimspy/builder.py
+aimspy/cli.py
+aimspy/config.py
+binding/
+scripts/
+tests/
+Makefile
