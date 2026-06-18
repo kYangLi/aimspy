@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aimspy"
-version = "0.0.1"
+version = "0.0.2"
 authors = [
     {name = "DeepH team", email = "deeph-pack@outlook.com"},
 ]
