@@ -46,6 +46,12 @@ Issues = "https://github.com/kYangLi/aimspy/issues"
 where = ["."]
 include = ["aimspy"]
 exclude = [
+    "aimspy.aims",
+    "aimspy.aims.*",
+    "aimspy.io",
+    "aimspy.io.*",
+    "aimspy.patches",
+    "aimspy.patches.*",
     "tests*", "binding*", "scripts*", "FHIaims*",
     "docs*", "examples*", ".*", "*.egg-info", "build*",
 ]
