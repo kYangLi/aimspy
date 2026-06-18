@@ -1,12 +1,21 @@
-# aimspy
+<h1 align="center">aimspy</h1>
 
-**AimSpy** is an in-memory Python interface to [FHI-aims](https://aims-code.rg.mpg.de/)
-via pybind11, designed for tight, memory-level integration with
-[DeepH/DeepX](https://github.com/deepmodeling/DeepH-Pack).
+<div align="center">
 
-It enables driving FHI-aims calculations directly from Python — no
-subprocess, no file-staged I/O for hot paths — by linking a small
-pybind11 extension against the FHI-aims Fortran library.
+[![PyPI Version](https://img.shields.io/pypi/v/aimspy.svg)](https://pypi.org/project/aimspy/)
+[![Python Versions](https://img.shields.io/badge/python-3.12|3.13|3.14-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/pypi/l/aimspy.svg)](https://pypi.org/project/aimspy/)
+[![GitHub Issues](https://img.shields.io/github/issues/kYangLi/aimspy.svg)](https://github.com/kYangLi/aimspy/issues)
+[![GitHub Stars](https://img.shields.io/github/stars/kYangLi/aimspy.svg?style=social)](https://github.com/kYangLi/aimspy/stargazers)
+
+*In-memory Python interface to FHI-aims via pybind11, for seamless integration with [DeepX/DeepH-pack](https://github.com/kYangLi/DeepH-pack-docs).*
+
+</div>
+
+**AimSpy** enables driving [FHI-aims](https://aims-code.rg.mpg.de/)
+calculations directly from Python — no subprocess, no file-staged I/O
+for hot paths — by linking a small pybind11 extension against the
+FHI-aims Fortran library.
 
 > **Status:** `v0.0.1` is a minimal placeholder release for reserving
 > the package name on PyPI. The frontend (Python object model for aims
