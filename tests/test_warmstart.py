@@ -62,19 +62,20 @@ if rank == 0:
           f"n_cells={calc.info.n_cells}, "
           f"n_ham_size={calc.info.n_ham_size}")
 
-calc.run()
+try:
+    calc.run()
 
-if rank == 0:
-    H = calc.rs_hamiltonian
-    ref_H = np.loadtxt(DATA_DIR / "rs_hamiltonian.out", dtype=np.float64)
-    ref_H = ref_H.reshape(1, -1) if ref_H.ndim == 1 else ref_H
+    if rank == 0:
+        H = calc.rs_hamiltonian
+        ref_H = np.loadtxt(DATA_DIR / "rs_hamiltonian.out", dtype=np.float64)
+        ref_H = ref_H.reshape(1, -1) if ref_H.ndim == 1 else ref_H
 
-    print(f"[run] H shape: {H.shape}")
-    print(f"[run] max|H|        = {np.max(np.abs(H)):.6e} Hartree")
-    print(f"[run] H[0,0]        = {H[0,0]:.6e} Hartree")
-    print(f"[run] ref_H[0,0]    = {ref_H[0,0]:.6e} Hartree")
-    print(f"[run] close to ref  = {np.allclose(H, ref_H, atol=1e-6)}")
-    print("TEST PASSED")
-
-calc.close()
-comm.Barrier()
+        print(f"[run] H shape: {H.shape}")
+        print(f"[run] max|H|        = {np.max(np.abs(H)):.6e} Hartree")
+        print(f"[run] H[0,0]        = {H[0,0]:.6e} Hartree")
+        print(f"[run] ref_H[0,0]    = {ref_H[0,0]:.6e} Hartree")
+        print(f"[run] close to ref  = {np.allclose(H, ref_H, atol=1e-6)}")
+        print("TEST PASSED")
+finally:
+    calc.close()
+    comm.Barrier()

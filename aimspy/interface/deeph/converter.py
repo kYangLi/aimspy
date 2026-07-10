@@ -7,14 +7,9 @@ conventions, so the conversion involves only:
 """
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Union
-
-import numpy as np
-
 from ...structure import AimspyStructure
 from ...matrix import AimspyMatrix
-from ...data import EV_TO_HARTREE, HARTREE_TO_EV
+from ...data import EV_TO_HARTREE
 from .. import ExternalMatrixSource
 from .data import DeepHData
 
@@ -100,50 +95,4 @@ def aimspy_to_deeph(
     Atom indices in the aimspy blocks are aims order; the output uses
     POSCAR order.
     """
-    old2new, _ = structure.build_atom_permutation()
-    # old2new[aims_atom] = POSCAR_atom
-
-    # Collect blocks re-mapped to POSCAR order
-    pair_blocks: dict[tuple, np.ndarray] = {}
-    for (R1, R2, R3, i_aims, j_aims), block in matrix.blocks.items():
-        i_deeph = int(old2new[i_aims])
-        j_deeph = int(old2new[j_aims])
-        key = (R1, R2, R3, i_deeph, j_deeph)
-        if key not in pair_blocks:
-            pair_blocks[key] = block.copy()
-        else:
-            # Should not happen for a clean dict, but be safe
-            pair_blocks[key] = np.maximum(pair_blocks[key], block)
-
-    return DeepHData.from_memory(
-        lattice=structure.lattice.copy(),
-        atom_symbols=list(structure.atoms_species_sorted),
-        atom_coords=_reorder_coords(structure),
-        elements_orbital_map=_build_elements_orbital_map(structure),
-        pair_blocks=pair_blocks,
-    )
-
-
-# -------------------------------------------------------------------
-# Internal helpers
-# -------------------------------------------------------------------
-def _reorder_coords(structure: AimspyStructure) -> np.ndarray:
-    """Return atom coords in POSCAR (element‑grouped) order."""
-    _, new2old = structure.build_atom_permutation()
-    n = structure.n_atoms
-    coords = np.zeros((n, 3), dtype=np.float64)
-    for i_deeph in range(n):
-        i_aims = int(new2old[i_deeph])
-        coords[i_deeph] = structure.atom_coords[i_aims]
-    return coords
-
-
-def _build_elements_orbital_map(structure: AimspyStructure) -> dict:
-    """Build ``{element: [l values]}`` from structure info."""
-    result: dict[str, list[int]] = {}
-    for idx in range(structure.n_atoms):
-        elem = structure.atom_symbols[idx]
-        mask = structure.basis_atom == idx
-        ls = sorted(set(int(l) for l in structure.basis_l[mask]))
-        result.setdefault(elem, []).extend(ls)
-    return {k: sorted(set(v)) for k, v in result.items()}
+    return DeepHData.from_aimspy(structure, H=matrix)

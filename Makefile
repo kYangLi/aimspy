@@ -1,4 +1,4 @@
-.PHONY: clean install test tests build lint help patch generate-patch
+.PHONY: clean install test build lint help patch
 
 VENV := .venv
 .DEFAULT_GOAL := help
@@ -12,7 +12,6 @@ help:
 	@echo "  build            Build distribution wheel"
 	@echo "  lint             Run ruff check + black"
 	@echo "  patch            Apply the bundled FHI-aims patch to AIMS_SOURCE"
-	@echo "  generate-patch   Regenerate aimspy/patches/fhiaims_250822_1.patch from binding/"
 	@echo "  clean            Remove build artifacts and cache files"
 	@echo "  help             Show this help message"
 

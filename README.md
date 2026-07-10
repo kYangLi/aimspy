@@ -17,15 +17,23 @@ calculations directly from Python — no subprocess, no file-staged I/O
 for hot paths — by linking a small ctypes extension against the
 FHI-aims Fortran library.
 
-> **Status:** `v0.0.1` is a minimal placeholder release for reserving
-> the package name on PyPI. The frontend (Python object model for aims
-> inputs), backend (ctypes binding), and test suite (DFT benchmark
-> cases) are under active development and will follow in subsequent
-> versions.
+> **Status:** `v0.1.0` — Calculator, ctypes binding, callback framework,
+> aimspy standard format, and DeepH interface layer are implemented
+> and tested. The package is alpha-stage but functional.
 
 ## Installation
 
-<!-- TODO: pip install / editable / dev extras -->
+```bash
+pip install aimspy
+```
+
+Or install from source in editable mode with development dependencies:
+
+```bash
+git clone https://github.com/kYangLi/aimspy.git
+cd aimspy/pyapi
+pip install -e ".[dev]"
+```
 
 ## Patching FHI-aims
 
@@ -109,11 +117,53 @@ Options:
 
 ## Usage
 
-<!-- TODO: Calculator API, configuration, callbacks, examples -->
+### Baseline SCF
+
+```python
+from aimspy import Calculator, CalculatorConfig
+
+with Calculator(CalculatorConfig(
+    lib_path="/path/to/libaims.so",
+    work_dir="./MoS2",
+)) as calc:
+    calc.run()
+    H = calc.hamiltonian     # AimspyMatrix
+    E = calc.energy          # float (Hartree)
+```
+
+### DeepH warmstart
+
+```python
+from aimspy.interface.deeph import DeepHData, DeepHSource
+
+deeph_data = DeepHData.from_directory("deeph_warm/")
+calc.modify_h0(source=DeepHSource(deeph_data))
+calc.init(comm)
+calc.run()
+# SCF converges in 1 iteration
+```
+
+### Export to DeepH format
+
+```python
+calc.run()
+H_aimspy = calc.hamiltonian
+S_aimspy = calc.overlap
+H0 = calc.initial_hamiltonian  # requires calc.capture_h0 = True
+
+from aimspy.interface.deeph import DeepHData
+dd = DeepHData.from_aimspy(calc.structure, H=H_aimspy, S=S_aimspy, H0=H0)
+dd.save("deeph_out/")
+```
 
 ## Development
 
-<!-- TODO: contributing, tests, lint, build -->
+```bash
+make install    # create .venv, install editable with dev deps
+make test       # run tests
+make lint       # ruff check + black --check
+make build      # build wheel
+```
 
 ## Licensing
 
