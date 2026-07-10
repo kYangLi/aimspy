@@ -238,17 +238,4 @@ aimspy/**/*.pyd
 
 # Local patch working dirs
 _patch_work/
-
-# ---- v0.0 skeleton — kept in working dir for team alignment, not committed ----
-# These will be developed into v0.1+ by frontend / backend / test teams.
-aimspy/aims/
-aimspy/io/
-aimspy/patches/
-aimspy/patcher.py
-aimspy/builder.py
-aimspy/cli.py
-aimspy/config.py
-binding/
-scripts/
-tests/
-Makefile
+/design/

@@ -2,22 +2,21 @@
 requires = ["setuptools>=80", "wheel"]
 build-backend = "setuptools.build_meta"
 
-
 [project]
 name = "aimspy"
-version = "0.0.2"
+version = "0.1.0"
 authors = [
     {name = "DeepH team", email = "deeph-pack@outlook.com"},
 ]
-description = "In-memory Python interface to FHI-aims via pybind11, for seamless integration with DeepH/DeepX."
+description = "Pure-Python in-memory interface to FHI-aims via ctypes, for seamless integration with DeepX/DeepH."
 readme = "README.md"
 license = "GPL-3.0-or-later"
 keywords = [
-    "FHI-aims", "DFT", "ab initio", "pybind11", "deeph", "deepx",
+    "FHI-aims", "DFT", "ab initio", "ctypes", "deeph", "deepx",
     "materials science", "quantum chemistry",
 ]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -26,7 +25,12 @@ classifiers = [
 ]
 
 requires-python = ">=3.12,<3.15"
-dependencies = []
+dependencies = [
+    "numpy>=1.24",
+    "h5py>=3.0",
+    "mpi4py>=3.0",
+    "click>=8.0",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -34,6 +38,9 @@ dev = [
     "ruff>=0.1.0",
     "black>=23.0",
 ]
+
+[project.scripts]
+aimspy = "aimspy.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/kYangLi/aimspy"
@@ -43,14 +50,9 @@ Issues = "https://github.com/kYangLi/aimspy/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["aimspy"]
-exclude = [
-    "aimspy.aims",
-    "aimspy.aims.*",
-    "aimspy.io",
-    "aimspy.io.*",
-    "aimspy.patches",
-    "aimspy.patches.*",
-    "tests*", "binding*", "scripts*", "FHIaims*",
-    "docs*", "examples*", ".*", "*.egg-info", "build*",
-]
+include = ["aimspy*"]
+exclude = ["tests*", "scripts*", ".*", "*.egg-info", "build*"]
+
+[tool.setuptools.package-data]
+aimspy = ["_patches/*.diff"]
+"aimspy._patches" = ["*.diff"]

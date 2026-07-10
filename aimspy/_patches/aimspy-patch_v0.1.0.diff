@@ -1,0 +1,1053 @@
+diff --git a/.gitignore b/.gitignore
+index f0ecb772..601092ed 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -2,6 +2,7 @@
+ # Lines that start with '#' are comments.
+ # For a project mostly in C, the following would be a good set of
+ # exclude patterns (uncomment them if you want to use them):
++.fortls
+ *.optrpt
+ *.lst
+ *.reini
+@@ -58,3 +59,4 @@ src/gpu/CUDA/nvtx/src
+ src/gpu/CUDA/nvtx/src/*
+ # For our deeph task
+ /buildx/
++tests/
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 00000000..03591288
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,12 @@
++.PHONY: patch
++
++PATCH_VERSION := v0.1.0
++DIFF_FROM     := dev
++DIFF_TO       := feature/aimspy
++PATCH_EXCLUDE := ':!src/aimspy_api/pytests'
++PATCH_OUTPUT  := ../pyapi/aimspy/_patches/aimspy-patch_$(PATCH_VERSION).diff
++
++patch:
++	@mkdir -p $(dir $(PATCH_OUTPUT))
++	git diff $(DIFF_FROM)..$(DIFF_TO) -- $(PATCH_EXCLUDE) > $(PATCH_OUTPUT)
++	@echo "Generated $(PATCH_OUTPUT)"
+\ No newline at end of file
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index bb052399..68afa156 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -185,6 +185,9 @@ endif()
+ # ASI API
+ target_sources(aims1 PRIVATE dft_api_data.f90 dft_api.f90 apicallback.f90)
+ 
++# AimSpy API
++add_subdirectory(aimspy_api)
++
+ # i-Pi Python interface
+ if (NOT USE_iPI)
+   target_sources(aims5 PRIVATE ipi_stubs.f90)
+diff --git a/src/aimspy_api/CMakeLists.txt b/src/aimspy_api/CMakeLists.txt
+new file mode 100644
+index 00000000..4abdeabf
+--- /dev/null
++++ b/src/aimspy_api/CMakeLists.txt
+@@ -0,0 +1,15 @@
++# AimSpy API
++# These files are added to aims1, same layer as ASI API files.
++
++target_sources(aims1 PRIVATE
++    ${CMAKE_CURRENT_LIST_DIR}/callback.f90
++    ${CMAKE_CURRENT_LIST_DIR}/api_bank.f90
++    ${CMAKE_CURRENT_LIST_DIR}/info.f90
++    ${CMAKE_CURRENT_LIST_DIR}/register.f90
++)
++
++if(BUILD_SHARED_LIBS)
++    target_sources(aims1 PRIVATE
++        ${CMAKE_CURRENT_LIST_DIR}/main.f90
++    )
++endif()
+\ No newline at end of file
+diff --git a/src/aimspy_api/api_bank.f90 b/src/aimspy_api/api_bank.f90
+new file mode 100644
+index 00000000..f8180616
+--- /dev/null
++++ b/src/aimspy_api/api_bank.f90
+@@ -0,0 +1,93 @@
++module aimspy_api_bank
++
++    use iso_c_binding
++    use mpi_utilities
++    use mpi_tasks
++    use aimspy_callback, only: TAimspyCallback
++    implicit none
++
++    logical :: aimspy_initialized = .false.
++    logical :: aimspy_converged_scf = .false.
++
++    real*8, allocatable, target, save :: c_hamiltonian(:, :)
++    real*8, allocatable, target, save :: c_overlap(:)
++
++    type(TAimspyCallback) :: aimspy_callback_hd
++
++contains
++
++  function c_f_string(c_str) result(f_str)
++    use, intrinsic :: iso_c_binding, only: c_ptr, c_f_pointer, c_char, c_size_t
++    type(c_ptr), intent(in) :: c_str
++    character(:, kind=c_char), pointer :: f_str
++    character(kind=c_char), pointer :: arr(:)
++
++    interface
++      function strlen(s) bind(c, name='strlen')
++        use, intrinsic :: iso_c_binding, only: c_ptr, c_size_t
++        type(c_ptr), intent(in), value :: s
++        integer(c_size_t) :: strlen
++      end function strlen
++    end interface
++
++    call c_f_pointer(c_str, arr, [strlen(c_str)])
++    call get_scalar_pointer(size(arr), arr, f_str)
++  end function c_f_string
++
++
++  subroutine get_scalar_pointer(scalar_len, scalar, ptr)
++    use, intrinsic :: iso_c_binding, only: c_char
++    integer, intent(in) :: scalar_len
++    character(kind=c_char, len=scalar_len), intent(in), target :: scalar(1)
++    character(:, kind=c_char), intent(out), pointer :: ptr
++
++    ptr => scalar(1)
++  end subroutine get_scalar_pointer
++
++  type(c_ptr) function c_rs_hamiltonian() bind(c, name='c_rs_hamiltonian')
++    implicit none
++
++    !write(*, '(A)') "get c_rs_hamiltonian"
++    if (myid==0) then
++      c_rs_hamiltonian = c_loc(c_hamiltonian) 
++    else
++      c_rs_hamiltonian = c_null_ptr
++    end if
++  end function c_rs_hamiltonian
++
++  type(c_ptr) function c_rs_overlap() bind(c, name='c_rs_overlap')
++    implicit none
++
++    !write(*, '(A)') "get c_rs_overlap"
++    if (myid==0) then
++      c_rs_overlap = c_loc(c_overlap) 
++    else
++      c_rs_overlap = c_null_ptr
++    end if
++  end function c_rs_overlap
++
++  real*8 function aimspy_energy() bind(c, name='aimspy_energy')
++    use physics, only: total_energy, post_scf_total_energy
++    implicit none
++
++    if (post_scf_total_energy /= 0.0d0) then
++      aimspy_energy = post_scf_total_energy
++    else
++      aimspy_energy = total_energy
++    end if
++  end function aimspy_energy
++
++  type(c_ptr) function aimspy_forces() bind(c, name='aimspy_forces')
++    use physics, only: total_forces  ! shape (3, natoms) in fortran
++    use dimensions, only: use_forces
++    implicit none
++
++    if (use_forces) then
++      aimspy_forces = c_loc(total_forces)
++    else
++      aimspy_forces = c_null_ptr
++    end if
++
++  end function aimspy_forces
++
++end module aimspy_api_bank
+\ No newline at end of file
+diff --git a/src/aimspy_api/callback.f90 b/src/aimspy_api/callback.f90
+new file mode 100644
+index 00000000..84df2c14
+--- /dev/null
++++ b/src/aimspy_api/callback.f90
+@@ -0,0 +1,241 @@
++module aimspy_callback
++
++    use iso_c_binding
++    implicit none
++    private
++
++    public :: TAimspyCallback
++    public :: TAimspyCsrMxDescr
++
++
++        type, bind(c) :: TAimspyCsrMxDescr
++            integer(c_int) :: n_basis
++            integer(c_int) :: n_spin
++            integer(c_int) :: n_cells
++            integer(c_int) :: n_ham_size ! nnz + 1
++
++            type(c_ptr)  :: cell_idx     = c_null_ptr  ! cell_index, shape (n_cells, n_coords), n_coords = 3
++            type(c_ptr)  :: row_mx_idx   = c_null_ptr  ! index_hamiltonian, shape (2, n_cells, n_basis)
++            type(c_ptr)  :: col_mx_idx   = c_null_ptr  ! column_index_hamiltonian, shape (n_ham_size)
++        end type TAimspyCsrMxDescr
++
++        type :: TAimspyCallback
++            
++            type(c_ptr), private :: descr_ptr  = c_null_ptr ! TAimspyCsrMxDescr ptr
++
++            ! ============== [1]. callback functions pointers and aux pointers ===========
++            ! get mx descripter
++            type(c_funptr), private :: get_descr_callback = c_null_funptr
++            type(c_ptr), private    :: get_descr_aux_ptr  = c_null_ptr
++
++            ! export H0
++            type(c_funptr), private :: export_h0_callback = c_null_funptr
++            type(c_ptr), private    :: export_h0_aux_ptr  = c_null_ptr
++
++            ! modify H0
++            type(c_funptr), private :: modify_h0_callback = c_null_funptr
++            type(c_ptr), private    :: modify_h0_aux_ptr  = c_null_ptr
++            type(c_ptr), private    :: modify_h0_input_mx_ptr   = c_null_ptr        ! c_ptr of double
++            logical        :: modify_h0_registed = .false.
++
++            ! only python callback
++            type(c_funptr), private :: python_callback = c_null_funptr
++            type(c_ptr), private    :: python_aux_ptr  = c_null_ptr
++
++          contains
++            ! ============== [2]. register methods and calling functins ==================
++            procedure :: register_get_descr
++            procedure :: get_descr_func
++
++            procedure :: register_export_h0
++            procedure :: export_h0_func
++
++            procedure :: register_modify_h0
++            procedure :: modify_h0_func
++
++            procedure :: register_python_callback
++            procedure :: python_func
++
++            ! ========================= end [1]. [2]. ====================================
++
++        end type TAimspyCallback
++
++        ! ============== [3]. interface about the callback c function ==================
++        abstract interface
++            subroutine aimspy_get_descr_cb_t(aux_ptr, descr_ptr) bind(c)
++                use iso_c_binding
++                type(c_ptr), value :: aux_ptr  ! same type as descr but from python
++                type(c_ptr), value :: descr_ptr
++            end subroutine
++        end interface
++
++        abstract interface
++            subroutine aimspy_export_mx_cb_t(aux_ptr, mx_ptr, n_ham_size, n_spin) bind(c)
++                use iso_c_binding
++                type(c_ptr), value :: aux_ptr
++                type(c_ptr), value :: mx_ptr
++                integer(c_int), value :: n_ham_size
++                integer(c_int), value :: n_spin
++            end subroutine
++        end interface
++
++        abstract interface
++            subroutine aimspy_modify_mx_cb_t(aux_ptr, input_mx_ptr, modified_mx_ptr, n_ham_size, n_spin) bind(c)
++                use iso_c_binding
++                type(c_ptr), value :: aux_ptr
++                type(c_ptr), value :: input_mx_ptr
++                type(c_ptr), value :: modified_mx_ptr
++                integer(c_int), value :: n_ham_size
++                integer(c_int), value :: n_spin
++            end subroutine aimspy_modify_mx_cb_t
++        end interface
++
++        abstract interface
++            subroutine aimspy_python_cb_t(aux_ptr) bind(c)
++                use iso_c_binding
++                type(c_ptr), value :: aux_ptr
++            end subroutine aimspy_python_cb_t
++        end interface
++        ! =================== end [3]. ======================================
++
++        type(TAimspyCsrMxDescr), target :: descr_storage
++
++    contains
++            
++            ! ============== [2]. register methods and calling functins ==================
++            subroutine fill_mx_descr(descr)
++                use iso_c_binding
++                use dimensions, only: n_basis, n_spin, n_hamiltonian_matrix_size
++                use pbc_lists, only: n_cells_in_hamiltonian, cell_index, index_hamiltonian, column_index_hamiltonian
++                type(TAimspyCsrMxDescr), intent(inout) :: descr
++
++                descr%n_basis = int(n_basis, c_int)
++                descr%n_spin = int(n_spin, c_int)
++                descr%n_cells = int(n_cells_in_hamiltonian, c_int)
++                descr%n_ham_size = int(n_hamiltonian_matrix_size, c_int)
++
++                descr%cell_idx = c_loc(cell_index(1,1))
++                descr%row_mx_idx = c_loc(index_hamiltonian(1,1,1))
++                descr%col_mx_idx = c_loc(column_index_hamiltonian(1))
++
++            end subroutine fill_mx_descr
++
++            subroutine register_get_descr(this, callback_funptr, aux_ptr)
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                type(c_funptr), value :: callback_funptr
++                type(c_ptr), value :: aux_ptr
++
++                this%get_descr_callback = callback_funptr
++                this%get_descr_aux_ptr = aux_ptr
++
++            end subroutine register_get_descr
++
++            subroutine get_descr_func(this)
++                use iso_c_binding
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                procedure(aimspy_get_descr_cb_t), pointer :: callback_proc
++
++                if (.not. c_associated(this%get_descr_callback)) then
++                    return
++                end if
++
++                if (.not. c_associated(this%descr_ptr)) then
++                    this%descr_ptr = c_loc(descr_storage)
++                end if
++
++                call c_f_procpointer(this%get_descr_callback, callback_proc)
++                call fill_mx_descr(descr_storage)
++                call callback_proc(this%get_descr_aux_ptr, this%descr_ptr)
++
++            end subroutine get_descr_func
++
++            subroutine register_export_h0(this, callback_funptr, aux_ptr)
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                type(c_funptr), value :: callback_funptr
++                type(c_ptr), value :: aux_ptr
++
++                this%export_h0_callback = callback_funptr
++                this%export_h0_aux_ptr = aux_ptr
++
++            end subroutine register_export_h0
++
++            subroutine export_h0_func(this, init_hamiltonian)
++                use iso_c_binding
++                use dimensions, only: n_hamiltonian_matrix_size, n_spin
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                real*8, intent(in), target :: init_hamiltonian(:, :)
++                procedure(aimspy_export_mx_cb_t), pointer :: callback_proc
++
++                if (.not. c_associated(this%export_h0_callback)) then
++                    return
++                end if
++
++                call c_f_procpointer(this%export_h0_callback, callback_proc)
++                call callback_proc(this%export_h0_aux_ptr, &
++                                  c_loc(init_hamiltonian(1,1)), &
++                                  int(n_hamiltonian_matrix_size, c_int), &
++                                  int(n_spin, c_int))
++            end subroutine export_h0_func
++
++            subroutine register_modify_h0(this, callback_funptr, aux_ptr, input_mx_ptr)
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                type(c_funptr), value :: callback_funptr
++                type(c_ptr), value :: aux_ptr
++                type(c_ptr), value :: input_mx_ptr
++
++                this%modify_h0_callback = callback_funptr
++                this%modify_h0_aux_ptr = aux_ptr
++                this%modify_h0_input_mx_ptr = input_mx_ptr
++                this%modify_h0_registed = .true.
++            end subroutine register_modify_h0
++
++            subroutine modify_h0_func(this, init_hamiltonian)
++                use iso_c_binding
++                use dimensions, only: n_hamiltonian_matrix_size, n_spin
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                real*8, intent(inout), target :: init_hamiltonian(:, :)
++                procedure(aimspy_modify_mx_cb_t), pointer :: callback_proc
++
++                if (.not. c_associated(this%modify_h0_callback)) then
++                    return
++                end if
++
++                call c_f_procpointer(this%modify_h0_callback, callback_proc)
++                call callback_proc(this%modify_h0_aux_ptr, &
++                                   this%modify_h0_input_mx_ptr, &
++                                  c_loc(init_hamiltonian(1,1)), &
++                                  int(n_hamiltonian_matrix_size, c_int), &
++                                  int(n_spin, c_int))
++            end subroutine modify_h0_func
++
++            subroutine register_python_callback(this, callback_funptr, aux_ptr)
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                type(c_funptr), value :: callback_funptr
++                type(c_ptr), value :: aux_ptr
++
++                this%python_callback = callback_funptr
++                this%python_aux_ptr = aux_ptr
++            end subroutine register_python_callback
++
++            subroutine python_func(this)
++                use iso_c_binding
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                procedure(aimspy_python_cb_t), pointer :: callback_proc
++
++                if (.not. c_associated(this%python_callback)) then
++                    return
++                end if
++
++                call c_f_procpointer(this%python_callback, callback_proc)
++                call callback_proc(this%python_aux_ptr)
++            end subroutine python_func
++
++end module aimspy_callback
+\ No newline at end of file
+diff --git a/src/aimspy_api/info.f90 b/src/aimspy_api/info.f90
+new file mode 100644
+index 00000000..59c44dd4
+--- /dev/null
++++ b/src/aimspy_api/info.f90
+@@ -0,0 +1,331 @@
++!****h* aimspy_api/info
++!  PURPOSE
++!    Aggregate snapshot of basic FHI-aims runtime information exposed to
++!    Python as a single bind(C) structure. One C call returns all scalar
++!    quantities, option flags, and array pointers (geometry, species,
++!    basis functions, k-points, MPI state).
++!
++!  DESIGN
++!    - Mirrors the save-buffer pattern proven in c_rs_hamiltonian
++!      (api_bank.f90): module-level `save` allocatable arrays hold copies
++!      of aims internal data, c_loc(buf(1)) returns their base addresses.
++!    - Does NOT modify any core aims module (geometry / physics / basis /
++!      species_data / pbc_lists): we only READ from them via `use`.
++!    - Must be called AFTER aimspy_run() (i.e. after initialize_scf),
++!      otherwise geometry / basis arrays are not allocated yet and the
++!      function aborts with a clear message.
++!******
++module aimspy_info
++  use iso_c_binding
++  implicit none
++  private
++
++  public :: TAimspyInfo
++  public :: aimspy_get_info
++
++  !> C-interoperable aggregate structure. Mirrors Python-side
++  !> `AimspyInfoC(ctypes.Structure)`. Field order MUST match the Python
++  !> `_fields_` list exactly.
++  type, bind(C) :: TAimspyInfo
++    ! ===== scalars =====
++    integer(c_int)  :: n_atoms
++    integer(c_int)  :: n_species
++    integer(c_int)  :: n_basis
++    integer(c_int)  :: n_basis_fns
++    integer(c_int)  :: n_spin
++    integer(c_int)  :: n_k_points
++    integer(c_int)  :: n_states
++    integer(c_int)  :: n_cells                ! n_cells_in_hamiltonian
++    integer(c_int)  :: n_ham_size             ! n_hamiltonian_matrix_size
++    integer(c_int)  :: n_periodic
++    integer(c_int)  :: n_centers_basis_I
++    integer(c_int)  :: n_centers_basis_T
++    integer(c_int)  :: n_full_points
++    integer(c_int)  :: n_full_points_total
++    integer(c_int)  :: spin_degeneracy        ! real*8 truncated to int (1 or 2)
++    integer(c_int)  :: packed_matrix_format   ! 0=PM_none, 2=PM_index
++    integer(c_int)  :: flag_rel               ! 0..8
++    integer(c_int)  :: spin_treatment         ! 0=none, 1=collinear
++    integer(c_int)  :: myid
++    integer(c_int)  :: n_tasks
++
++    ! ===== bools (1 byte each, c_bool) =====
++    logical(c_bool) :: use_scalapack
++    logical(c_bool) :: use_elpa
++    logical(c_bool) :: real_eigenvectors
++    logical(c_bool) :: use_hartree_fock
++    logical(c_bool) :: use_periodic_hf
++    logical(c_bool) :: use_hf_kspace
++    logical(c_bool) :: use_mpi
++
++    ! NOTE: char buffers (output_level) are exposed as a SEPARATE
++    ! pointer (output_level_ptr) at the end of the struct, to avoid
++    ! padding mismatches between Fortran bind(C) and ctypes.Structure
++    ! that arise when fixed-length character arrays are placed inline
++    ! next to c_ptr fields with different alignment requirements.
++
++    ! ===== array pointers (point to module-level save buffers below) =====
++    ! geometry
++    type(c_ptr) :: coords_ptr           ! double[3*n_atoms]    Fortran (3, n_atoms)
++    type(c_ptr) :: frac_coords_ptr      ! double[3*n_atoms]    or NULL
++    type(c_ptr) :: lattice_ptr          ! double[9]            3x3, first n_periodic cols valid
++    type(c_ptr) :: recip_lattice_ptr    ! double[3*n_periodic] or NULL
++    type(c_ptr) :: species_idx_ptr      ! int[n_atoms]         1..n_species
++    ! species
++    type(c_ptr) :: species_names_ptr    ! char[20*n_species]
++    type(c_ptr) :: species_elements_ptr ! char[2*n_species]
++    type(c_ptr) :: species_z_ptr        ! double[n_species]
++    ! k-points
++    type(c_ptr) :: k_points_ptr         ! double[3*n_k]        Fortran (3, n_k)
++    type(c_ptr) :: k_weights_ptr        ! double[n_k]
++    ! basis function level
++    type(c_ptr) :: basis_atom_ptr       ! int[n_basis]         1..n_atoms
++    type(c_ptr) :: basis_l_ptr          ! int[n_basis]
++    type(c_ptr) :: basis_m_ptr          ! int[n_basis]
++    type(c_ptr) :: basis_fn_ptr         ! int[n_basis]         1..n_basis_fns
++    ! basis radial function level
++    type(c_ptr) :: basisfn_n_ptr        ! int[n_basis_fns]
++    type(c_ptr) :: basisfn_l_ptr        ! int[n_basis_fns]
++    type(c_ptr) :: basisfn_type_ptr     ! char[8*n_basis_fns]
++    type(c_ptr) :: basisfn_species_ptr  ! int[n_basis_fns]     1..n_species
++    ! output level (Fortran character*20 stored in module-level buffer)
++    type(c_ptr) :: output_level_ptr     ! char[20]
++  end type TAimspyInfo
++
++  ! ===== module-level single-instance struct buffer =====
++  ! Lifetime = process lifetime; c_loc(info_buf) returned to Python.
++  type(TAimspyInfo), target, save :: info_buf
++
++  ! ===== module-level save array buffers =====
++  ! Each call to aimspy_get_info re-fills them (deallocate + allocate + copy).
++  real(c_double),                 allocatable, target, save :: coords_buf(:)
++  real(c_double),                 allocatable, target, save :: frac_coords_buf(:)
++  real(c_double),                 allocatable, target, save :: lattice_buf(:)
++  real(c_double),                 allocatable, target, save :: recip_lattice_buf(:)
++  integer(c_int),                 allocatable, target, save :: species_idx_buf(:)
++  character(kind=c_char, len=20), allocatable, target, save :: species_names_buf(:)
++  character(kind=c_char, len=2),  allocatable, target, save :: species_elements_buf(:)
++  real(c_double),                 allocatable, target, save :: species_z_buf(:)
++  real(c_double),                 allocatable, target, save :: k_points_buf(:)
++  real(c_double),                 allocatable, target, save :: k_weights_buf(:)
++  integer(c_int),                 allocatable, target, save :: basis_atom_buf(:)
++  integer(c_int),                 allocatable, target, save :: basis_l_buf(:)
++  integer(c_int),                 allocatable, target, save :: basis_m_buf(:)
++  integer(c_int),                 allocatable, target, save :: basis_fn_buf(:)
++  integer(c_int),                 allocatable, target, save :: basisfn_n_buf(:)
++  integer(c_int),                 allocatable, target, save :: basisfn_l_buf(:)
++  character(kind=c_char, len=8),  allocatable, target, save :: basisfn_type_buf(:)
++  integer(c_int),                 allocatable, target, save :: basisfn_species_buf(:)
++  character(kind=c_char, len=20), target, save              :: output_level_buf
++
++contains
++
++  !> Single entry point: fill info_buf with a snapshot of the current
++  !> aims runtime state and return its address. Must be called after
++  !> aimspy_run() so that geometry / basis arrays are allocated.
++  type(c_ptr) function aimspy_get_info() bind(c, name="aimspy_get_info")
++    use dimensions,       only: n_atoms, n_species, n_basis, n_basis_fns, &
++                                n_spin, n_k_points, n_states,           &
++                                n_hamiltonian_matrix_size, n_periodic,   &
++                                n_centers_basis_I, n_centers_basis_T,    &
++                                n_full_points, n_full_points_total,      &
++                                spin_degeneracy,                          &
++                                use_hartree_fock, use_periodic_hf, use_hf_kspace
++    use runtime_choices,  only: packed_matrix_format, flag_rel,          &
++                                spin_treatment,                          &
++                                use_scalapack, use_elpa,                 &
++                                real_eigenvectors, output_level
++    use geometry,         only: coords, frac_coords,                     &
++                                lattice_vector, recip_lattice_vector,    &
++                                species
++    use species_data,     only: species_name, species_element, species_z
++    use pbc_lists,        only: k_point_list, k_weights, n_cells_in_hamiltonian
++    use basis,            only: basis_atom, basis_l, basis_m, basis_fn,  &
++                                basisfn_n, basisfn_l, basisfn_type,      &
++                                basisfn_species
++    use mpi_tasks,        only: myid, n_tasks, use_mpi, aims_stop
++    implicit none
++
++    character(*), parameter :: func = "aimspy_get_info"
++    integer :: i, n_trim
++
++    ! ---- sanity: must be called after aimspy_run / initialize_scf ----
++    if (.not. allocated(coords)) then
++      call aims_stop("geometry%coords is not allocated. Call aimspy_get_info &
++                      &only AFTER aimspy_run() (or initialize_scf()).", func)
++    end if
++    if (.not. allocated(basis_atom)) then
++      call aims_stop("basis%basis_atom is not allocated. Call aimspy_get_info &
++                      &only AFTER aimspy_run() (or initialize_scf()).", func)
++    end if
++
++    ! ---- scalars ----
++    info_buf%n_atoms       = int(n_atoms, c_int)
++    info_buf%n_species     = int(n_species, c_int)
++    info_buf%n_basis       = int(n_basis, c_int)
++    info_buf%n_basis_fns   = int(n_basis_fns, c_int)
++    info_buf%n_spin        = int(n_spin, c_int)
++    info_buf%n_k_points    = int(n_k_points, c_int)
++    info_buf%n_states      = int(n_states, c_int)
++    info_buf%n_cells       = int(n_cells_in_hamiltonian, c_int)
++    info_buf%n_ham_size    = int(n_hamiltonian_matrix_size, c_int)
++    info_buf%n_periodic    = int(n_periodic, c_int)
++    info_buf%n_centers_basis_I = int(n_centers_basis_I, c_int)
++    info_buf%n_centers_basis_T = int(n_centers_basis_T, c_int)
++    info_buf%n_full_points      = int(n_full_points, c_int)
++    info_buf%n_full_points_total= int(n_full_points_total, c_int)
++    info_buf%spin_degeneracy    = int(spin_degeneracy, c_int)
++    info_buf%packed_matrix_format = int(packed_matrix_format, c_int)
++    info_buf%flag_rel        = int(flag_rel, c_int)
++    info_buf%spin_treatment  = int(spin_treatment, c_int)
++    info_buf%myid            = int(myid, c_int)
++    info_buf%n_tasks         = int(n_tasks, c_int)
++
++    ! ---- bools ----
++    info_buf%use_scalapack     = logical(use_scalapack,     c_bool)
++    info_buf%use_elpa          = logical(use_elpa,          c_bool)
++    info_buf%real_eigenvectors = logical(real_eigenvectors, c_bool)
++    info_buf%use_hartree_fock  = logical(use_hartree_fock,  c_bool)
++    info_buf%use_periodic_hf   = logical(use_periodic_hf,   c_bool)
++    info_buf%use_hf_kspace     = logical(use_hf_kspace,     c_bool)
++    info_buf%use_mpi           = logical(use_mpi,           c_bool)
++
++    ! ---- output_level (char*20 stored in module-level buffer) ----
++    output_level_buf = output_level
++    info_buf%output_level_ptr = c_loc(output_level_buf)
++
++    ! ============= geometry =============
++    ! coords: real*8 (3, n_atoms) -> flat 3*n_atoms, column-major
++    if (allocated(coords_buf)) deallocate(coords_buf)
++    allocate(coords_buf(3 * n_atoms))
++    coords_buf = reshape(coords, [3 * n_atoms])
++    info_buf%coords_ptr = c_loc(coords_buf(1))
++
++    ! frac_coords (optional)
++    if (allocated(frac_coords)) then
++      if (allocated(frac_coords_buf)) deallocate(frac_coords_buf)
++      allocate(frac_coords_buf(3 * n_atoms))
++      frac_coords_buf = reshape(frac_coords, [3 * n_atoms])
++      info_buf%frac_coords_ptr = c_loc(frac_coords_buf(1))
++    else
++      info_buf%frac_coords_ptr = c_null_ptr
++    end if
++
++    ! lattice: always copy 3x3 (cluster case: first n_periodic=0 cols unused)
++    if (allocated(lattice_buf)) deallocate(lattice_buf)
++    allocate(lattice_buf(9))
++    lattice_buf = 0_c_double
++    if (n_periodic > 0 .and. allocated(lattice_vector)) then
++      do i = 1, n_periodic
++        lattice_buf((i-1)*3+1 : i*3) = lattice_vector(:, i)
++      end do
++    end if
++    info_buf%lattice_ptr = c_loc(lattice_buf(1))
++
++    ! recip_lattice: only valid when n_periodic > 0
++    if (n_periodic > 0 .and. allocated(recip_lattice_vector)) then
++      if (allocated(recip_lattice_buf)) deallocate(recip_lattice_buf)
++      allocate(recip_lattice_buf(3 * n_periodic))
++      do i = 1, n_periodic
++        recip_lattice_buf((i-1)*3+1 : i*3) = recip_lattice_vector(:, i)
++      end do
++      info_buf%recip_lattice_ptr = c_loc(recip_lattice_buf(1))
++    else
++      info_buf%recip_lattice_ptr = c_null_ptr
++    end if
++
++    ! species_idx: 1..n_species
++    if (allocated(species_idx_buf)) deallocate(species_idx_buf)
++    allocate(species_idx_buf(n_atoms))
++    species_idx_buf = int(species, c_int)
++    info_buf%species_idx_ptr = c_loc(species_idx_buf(1))
++
++    ! ============= species data =============
++    if (allocated(species_names_buf)) deallocate(species_names_buf)
++    allocate(species_names_buf(n_species))
++    do i = 1, n_species
++      species_names_buf(i) = species_name(i)
++    end do
++    info_buf%species_names_ptr = c_loc(species_names_buf(1))
++
++    if (allocated(species_elements_buf)) deallocate(species_elements_buf)
++    allocate(species_elements_buf(n_species))
++    do i = 1, n_species
++      species_elements_buf(i) = species_element(i)
++    end do
++    info_buf%species_elements_ptr = c_loc(species_elements_buf(1))
++
++    if (allocated(species_z_buf)) deallocate(species_z_buf)
++    allocate(species_z_buf(n_species))
++    species_z_buf = species_z
++    info_buf%species_z_ptr = c_loc(species_z_buf(1))
++
++    ! ============= k-points =============
++    if (n_k_points > 0 .and. allocated(k_point_list)) then
++      if (allocated(k_points_buf)) deallocate(k_points_buf)
++      allocate(k_points_buf(3 * n_k_points))
++      ! k_point_list internal shape is (n_k_points, 3); we expose (3, n_k)
++      ! column-major so Python reshapes(3, n_k, order='F').T -> (n_k, 3).
++      do i = 1, n_k_points
++        k_points_buf((i-1)*3+1 : i*3) = k_point_list(i, :)
++      end do
++      info_buf%k_points_ptr = c_loc(k_points_buf(1))
++
++      if (allocated(k_weights_buf)) deallocate(k_weights_buf)
++      allocate(k_weights_buf(n_k_points))
++      k_weights_buf = k_weights
++      info_buf%k_weights_ptr = c_loc(k_weights_buf(1))
++    else
++      info_buf%k_points_ptr  = c_null_ptr
++      info_buf%k_weights_ptr = c_null_ptr
++    end if
++
++    ! ============= basis function level =============
++    if (allocated(basis_atom_buf)) deallocate(basis_atom_buf)
++    allocate(basis_atom_buf(n_basis))
++    basis_atom_buf = int(basis_atom, c_int)
++    info_buf%basis_atom_ptr = c_loc(basis_atom_buf(1))
++
++    if (allocated(basis_l_buf)) deallocate(basis_l_buf)
++    allocate(basis_l_buf(n_basis))
++    basis_l_buf = int(basis_l, c_int)
++    info_buf%basis_l_ptr = c_loc(basis_l_buf(1))
++
++    if (allocated(basis_m_buf)) deallocate(basis_m_buf)
++    allocate(basis_m_buf(n_basis))
++    basis_m_buf = int(basis_m, c_int)
++    info_buf%basis_m_ptr = c_loc(basis_m_buf(1))
++
++    if (allocated(basis_fn_buf)) deallocate(basis_fn_buf)
++    allocate(basis_fn_buf(n_basis))
++    basis_fn_buf = int(basis_fn, c_int)
++    info_buf%basis_fn_ptr = c_loc(basis_fn_buf(1))
++
++    ! ============= basis radial function level =============
++    if (allocated(basisfn_n_buf)) deallocate(basisfn_n_buf)
++    allocate(basisfn_n_buf(n_basis_fns))
++    basisfn_n_buf = int(basisfn_n, c_int)
++    info_buf%basisfn_n_ptr = c_loc(basisfn_n_buf(1))
++
++    if (allocated(basisfn_l_buf)) deallocate(basisfn_l_buf)
++    allocate(basisfn_l_buf(n_basis_fns))
++    basisfn_l_buf = int(basisfn_l, c_int)
++    info_buf%basisfn_l_ptr = c_loc(basisfn_l_buf(1))
++
++    if (allocated(basisfn_type_buf)) deallocate(basisfn_type_buf)
++    allocate(basisfn_type_buf(n_basis_fns))
++    do i = 1, n_basis_fns
++      basisfn_type_buf(i) = basisfn_type(i)
++    end do
++    info_buf%basisfn_type_ptr = c_loc(basisfn_type_buf(1))
++
++    if (allocated(basisfn_species_buf)) deallocate(basisfn_species_buf)
++    allocate(basisfn_species_buf(n_basis_fns))
++    basisfn_species_buf = int(basisfn_species, c_int)
++    info_buf%basisfn_species_ptr = c_loc(basisfn_species_buf(1))
++
++    ! ---- return struct address ----
++    aimspy_get_info = c_loc(info_buf)
++  end function aimspy_get_info
++
++end module aimspy_info
+diff --git a/src/aimspy_api/main.f90 b/src/aimspy_api/main.f90
+new file mode 100644
+index 00000000..3ddc8360
+--- /dev/null
++++ b/src/aimspy_api/main.f90
+@@ -0,0 +1,80 @@
++module aimspy_main
++
++    use iso_c_binding
++    implicit none
++    private
++    public :: aimspy_init
++    public :: aimspy_run
++    public :: aimspy_finalize
++    public :: aimspy_all
++
++    integer       ::  aimspy_mpi_comm = 0
++    integer       ::  aimspy_mpi_rank = 0
++    integer       ::  aimspy_filehandle = 20
++    logical, parameter :: aimspy_mpi_switch = .True.
++
++contains
++
++    subroutine aimspy_init(c_mpi_comm_input, c_out_filename)  bind(c, name="aimspy_init")
++        use aimspy_api_bank, only: aimspy_initialized, c_f_string
++        implicit none
++
++        integer(c_int), value, intent(in) :: c_mpi_comm_input
++        type(c_ptr), value, intent(in) :: c_out_filename
++
++        character(:), pointer :: f_out_filename
++        integer :: myerr
++
++        f_out_filename => c_f_string(c_out_filename)
++        
++        aimspy_mpi_comm = c_mpi_comm_input
++        call mpi_comm_rank(aimspy_mpi_comm, aimspy_mpi_rank, myerr)
++
++        if (aimspy_mpi_rank == 0) then
++            open(aimspy_filehandle, file=f_out_filename, status='replace')
++        end if
++
++        aimspy_initialized = .True.
++
++        call aims_initialize(aimspy_mpi_comm, aimspy_filehandle, aimspy_mpi_switch)
++
++    end subroutine aimspy_init
++
++
++    subroutine aimspy_run()  bind(c, name="aimspy_run")
++        use aimspy_api_bank, only: aimspy_converged_scf, c_hamiltonian, c_overlap
++        implicit none
++
++        if (allocated(c_hamiltonian)) then
++            deallocate(c_hamiltonian)
++        end if
++
++        if (allocated(c_overlap)) then
++            deallocate(c_overlap)
++        end if
++
++        call aims_run(aimspy_converged_scf)
++    
++    end subroutine aimspy_run
++
++    subroutine aimspy_finalize()  bind(c, name="aimspy_finalize")
++        use aimspy_api_bank, only: aimspy_converged_scf
++        implicit none
++
++        call aims_finalize(aimspy_converged_scf)
++
++    end subroutine aimspy_finalize
++
++    subroutine aimspy_all(c_mpi_comm_input, c_out_filename)  bind(c, name="aimspy_all")
++        implicit none
++
++        integer(c_int), value, intent(in) :: c_mpi_comm_input
++        type(c_ptr), value, intent(in) :: c_out_filename
++
++        call aimspy_init(c_mpi_comm_input, c_out_filename)
++        call aimspy_run()
++        call aimspy_finalize()
++        
++    end subroutine aimspy_all
++
++end module aimspy_main
+\ No newline at end of file
+diff --git a/src/aimspy_api/register.f90 b/src/aimspy_api/register.f90
+new file mode 100644
+index 00000000..a41adf21
+--- /dev/null
++++ b/src/aimspy_api/register.f90
+@@ -0,0 +1,50 @@
++module aimspy_callback_register
++    use iso_c_binding
++    use aimspy_api_bank, only : aimspy_callback_hd
++    implicit none
++    private
++
++    public :: aimspy_register_get_descr_callback
++    public :: aimspy_register_export_h0_callback
++    public :: aimspy_register_modify_h0_callback
++
++    contains
++
++    subroutine aimspy_register_get_descr_callback(callback_funptr, aux_ptr) &
++        bind(c, name="aimspy_register_get_descr_callback")
++        use aimspy_api_bank, only : aimspy_callback_hd
++        type(c_funptr), value :: callback_funptr
++        type(c_ptr), value :: aux_ptr
++
++        call aimspy_callback_hd%register_get_descr(callback_funptr, aux_ptr)
++    end subroutine aimspy_register_get_descr_callback
++
++    subroutine aimspy_register_export_h0_callback(callback_funptr, aux_ptr) &
++        bind(c, name="aimspy_register_export_h0_callback")
++        use aimspy_api_bank, only : aimspy_callback_hd
++        type(c_funptr), value :: callback_funptr
++        type(c_ptr), value :: aux_ptr
++
++        call aimspy_callback_hd%register_export_h0(callback_funptr, aux_ptr)
++
++    end subroutine aimspy_register_export_h0_callback
++
++    subroutine aimspy_register_modify_h0_callback(callback_funptr, aux_ptr, input_mx_ptr) &
++        bind(c, name="aimspy_register_modify_h0_callback")
++        use aimspy_api_bank, only : aimspy_callback_hd
++        type(c_funptr), value :: callback_funptr
++        type(c_ptr), value :: aux_ptr
++        type(c_ptr), value :: input_mx_ptr
++
++        call aimspy_callback_hd%register_modify_h0(callback_funptr, aux_ptr, input_mx_ptr)
++    end subroutine aimspy_register_modify_h0_callback
++
++    subroutine aimspy_register_python_callback(callback_funptr, aux_ptr) bind(c, name="aimspy_register_python_callback")
++        use aimspy_api_bank, only : aimspy_callback_hd
++        type(c_funptr), value :: callback_funptr
++        type(c_ptr), value :: aux_ptr
++
++        call aimspy_callback_hd%register_python_callback(callback_funptr, aux_ptr)
++    end subroutine aimspy_register_python_callback
++
++end module aimspy_callback_register
+\ No newline at end of file
+diff --git a/src/initialize_scf.f90 b/src/initialize_scf.f90
+index 7a51c788..317ca099 100644
+--- a/src/initialize_scf.f90
++++ b/src/initialize_scf.f90
+@@ -81,6 +81,8 @@
+       use fock_routines, only: calculate_fock_matrix
+       use interface_aims_environ, only: update_geometry_environ
+ 
++      use aimspy_api_bank, only : aimspy_initialized, c_overlap, aimspy_callback_hd
++
+       implicit none
+ 
+ !  INTERFACES
+@@ -895,6 +897,37 @@
+          if(info) call reshape_matrices
+       end if
+ 
++      !block
++          !use aimspy_api_bank, only : aimspy_initialized, c_overlap, aimspy_callback_hd
++          
++          if (aimspy_initialized) then
++            if (myid == 0) then
++              if (.not. allocated(c_overlap)) then
++                allocate(c_overlap(n_hamiltonian_matrix_size))
++              endif
++
++              c_overlap = overlap_matrix
++            end if 
++
++              call aimspy_callback_hd%get_descr_func()
++              call aimspy_callback_hd%export_h0_func(hamiltonian)
++              call aimspy_callback_hd%python_func()  ! can reconstruct hamiltonian
++              if (aimspy_callback_hd%modify_h0_registed) then
++                  write(info_str,'(A)') ''
++                  call localorb_info(info_str,use_unit,'(A)', OL_norm)
++                  write(info_str,'(A)') '------------------------------------------------------------'
++                  call localorb_info(info_str,use_unit,'(A)', OL_norm)
++                  write(info_str,'(2X,A)') 'Aimspy warmstart module.'
++                  call localorb_info(info_str,use_unit,'(A)', OL_norm)
++
++                  call aimspy_callback_hd%modify_h0_func(hamiltonian)
++                  
++              end if
++
++          end if
++
++      !end block
++
+       if (.not.use_local_index .and. out_matrices) then
+          if (out_matrices_format_2005) then
+             call output_real_matrices ( overlap_matrix, hamiltonian )
+@@ -977,7 +1010,31 @@
+ 
+       if ( .not. (keep_restart_info.and.restart_file_exists) ) then
+  
+-        if(elsi_read_dm) then
++        if (aimspy_initialized .and. aimspy_callback_hd%modify_h0_registed) then
++            ! Restart with Aimspy
++            write(info_str,'(2X,A)') 'Aimspy warmstart: starting initial diagonalization of injected Hamiltonian.'
++            call localorb_info(info_str,use_unit,'(A)', OL_norm)
++            call advance_KS_solution(overlap_matrix, hamiltonian, n_electrons, KS_eigenvalue, KS_eigenvector, KS_eigenvector_complex, &
++                 occ_numbers, chemical_potential, chemical_potential_spin)
++
++            ! Reduce n_states in case of ill conditioning
++            ! The correct value is stored in n_states_k(:)
++            if (n_states_k(1) < n_states) then
++               call reshape_matrices_n_states(n_states_k(1))
++            end if
++
++            restart_zero_iteration = .true.
++
++            write(info_str,'(2X,A)') 'Aimspy warmstart: initial diagonalization finished.'
++            call localorb_info(info_str,use_unit,'(A)', OL_norm)
++            write(info_str,'(2X,A)') 'Aimspy warmstart: restart_zero_iteration=.true.; entering standard restart SCF path.'
++            call localorb_info(info_str,use_unit,'(A)', OL_norm)
++            write(info_str,'(A)') '------------------------------------------------------------'
++            call localorb_info(info_str,use_unit,'(A)', OL_norm)
++            write(info_str,'(A)') ''
++            call localorb_info(info_str,use_unit,'(A)', OL_norm)
++
++        else if(elsi_read_dm) then
+             ! Restart with ELSI
+             restart_zero_iteration = .true.
+         else
+diff --git a/src/pbc_lists.f90 b/src/pbc_lists.f90
+index 24f73f67..b319ae14 100644
+--- a/src/pbc_lists.f90
++++ b/src/pbc_lists.f90
+@@ -272,9 +272,9 @@ module pbc_lists
+ 
+   ! See comments on hamiltonian(:,:) in physics.f90 for the following:
+   integer:: n_cells_in_hamiltonian
+-  integer,dimension(:, :, :), allocatable:: index_hamiltonian
++  integer,dimension(:, :, :), allocatable, target :: index_hamiltonian
+   integer,dimension(:, :, :), allocatable:: index_hamiltonian_s ! for small components
+-  integer,dimension(:), allocatable:: column_index_hamiltonian
++  integer,dimension(:), allocatable, target :: column_index_hamiltonian
+   integer,dimension(:), allocatable:: column_index_hamiltonian_s ! for small components
+   logical, private :: sparse_matrix_needs_reduce
+ 
+@@ -290,7 +290,7 @@ module pbc_lists
+ 
+   ! * Cells
+ 
+-  integer, dimension(:,:), allocatable:: cell_index
++  integer, dimension(:,:), allocatable, target :: cell_index
+ 
+   integer, dimension(:,:), allocatable :: cell_index_pairs !SVL It is needed because the set of
+                                                            ! active supercell can be different
+diff --git a/src/scf_solver.f90 b/src/scf_solver.f90
+index b6fadba9..7d88f873 100644
+--- a/src/scf_solver.f90
++++ b/src/scf_solver.f90
+@@ -252,6 +252,7 @@
+       ! Spread across evaluate_xc.f90, xc.f90, scf_solver.f90, integrate_xc_energy.f90
+       use scf_convergence_tracker
+ 
++
+       use warnings
+ 
+       implicit none
+@@ -1622,6 +1623,22 @@
+               endif
+            end if
+         end if
++        
++        block
++          use aimspy_api_bank, only : aimspy_initialized, c_hamiltonian
++          
++          if (aimspy_initialized .and. myid == 0) then
++
++              if (.not. allocated(c_hamiltonian)) then
++                allocate(c_hamiltonian(n_hamiltonian_matrix_size, n_spin))
++              endif
++
++              c_hamiltonian = hamiltonian
++
++          end if
++
++        end block
++
+ 
+         if (use_friction.or.output_rs_matrices.or.use_superconduct) then
+           call store_hamiltonian()
+@@ -4271,7 +4288,6 @@
+               call output_rs_matrix(hamiltonian_stored,overlap_matrix)
+             endif
+         end if !output_rs_matrices
+-   
+          ! do double-hybrid density functional calculations, IGOR
+          if ((use_dftpt2 .or. use_dftpt2_qpe) .and. .not. use_meta_gga_post) then
+              total_energy_old = total_energy
