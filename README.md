@@ -31,7 +31,7 @@ Or install from source in editable mode with development dependencies:
 
 ```bash
 git clone https://github.com/kYangLi/aimspy.git
-cd aimspy/pyapi
+cd aimspy
 pip install -e ".[dev]"
 ```
 
