@@ -1,5 +1,7 @@
 /design/
 /tests/data/
+/examples/**/deeph_data
+*.out
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
