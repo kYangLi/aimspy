@@ -1,4 +1,5 @@
 """Public — load AimspyInfo from the live aims runtime."""
+
 from __future__ import annotations
 
 from ._binding.prototypes import BindingLib

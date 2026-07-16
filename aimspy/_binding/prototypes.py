@@ -2,14 +2,19 @@
 
 Adding a new C function = adding one entry to `_PROTOTYPES` dict.
 """
+
 from __future__ import annotations
 
 import logging
-from ctypes import CDLL, RTLD_GLOBAL, c_int, c_double, c_void_p, POINTER
+from ctypes import CDLL, c_int, c_double, c_void_p, POINTER
 
 from .ctypes_types import AimspyInfoC
 from .callback_types import (
-    GetDescrCb, ExportH0Cb, ModifyH0Cb, ReconstructMxCb,
+    GetDescrCb,
+    ExportOvlpCb,
+    ExportH0Cb,
+    ModifyH0Cb,
+    ReconstructMxCb,
 )
 
 _log = logging.getLogger(__name__)
@@ -19,25 +24,24 @@ _log = logging.getLogger(__name__)
 # =========================================================================
 _PROTOTYPES: dict[str, tuple[list, object]] = {
     # ---- lifecycle ----
-    'aimspy_init':       ([c_int, c_void_p], None),
-    'aimspy_run':        ([], None),
-    'aimspy_finalize':   ([], None),
-
+    "aimspy_init": ([c_int, c_void_p], None),
+    "aimspy_run": ([], None),
+    "aimspy_finalize": ([], None),
     # ---- info snapshot ----
-    'aimspy_get_info':   ([], POINTER(AimspyInfoC)),
-
+    "aimspy_get_info": ([], POINTER(AimspyInfoC)),
     # ---- real-space matrix pointers ----
-    'c_rs_hamiltonian':  ([], POINTER(c_double)),
-    'c_rs_overlap':      ([], POINTER(c_double)),
-
+    "c_rs_hamiltonian": ([], POINTER(c_double)),
+    "c_rs_overlap": ([], POINTER(c_double)),
     # ---- energy ----
-    'aimspy_energy':     ([], c_double),
-
+    "aimspy_energy": ([], c_double),
+    # ---- forces pointer ----
+    "aimspy_forces": ([], POINTER(c_double)),
     # ---- callback registration ----
-    'aimspy_register_get_descr_callback':     ([GetDescrCb, c_void_p], None),
-    'aimspy_register_export_h0_callback':     ([ExportH0Cb, c_void_p], None),
-    'aimspy_register_modify_h0_callback':     ([ModifyH0Cb, c_void_p, c_void_p], None),
-    'aimspy_register_python_callback':        ([ReconstructMxCb, c_void_p], None),
+    "aimspy_register_get_descr_callback": ([GetDescrCb, c_void_p], None),
+    "aimspy_register_export_ovlp_callback": ([ExportOvlpCb, c_void_p], None),
+    "aimspy_register_export_h0_callback": ([ExportH0Cb, c_void_p], None),
+    "aimspy_register_modify_h0_callback": ([ModifyH0Cb, c_void_p, c_void_p], None),
+    "aimspy_register_python_callback": ([ReconstructMxCb, c_void_p], None),
 }
 
 
@@ -96,6 +100,7 @@ class BindingLib:
         if name in ("has", "_cdll", "_available"):
             return object.__getattribute__(self, name)
         from .._exceptions import AimspyBindingError
+
         raise AimspyBindingError(
             f"C function {name!r} not available in loaded libaims "
             f"(available: {len(self._available)} funcs)"

@@ -18,7 +18,8 @@ for hot paths — by linking a small ctypes extension against the
 FHI-aims Fortran library.
 
 > **Status:** `v0.1.0` — Calculator, ctypes binding, callback framework,
-> aimspy standard format, and DeepH interface layer are implemented
+> aimspy standard format, DeepH interface layer, unified `modify()` API
+> (direct + deferred), forces export, and overlap capture are implemented
 > and tested. The package is alpha-stage but functional.
 
 ## Installation
@@ -115,46 +116,220 @@ Options:
   -y, --yes              Skip confirmation prompts
 ```
 
+## API Reference
+
+### `Calculator` — main class
+
+| Method / Property | Description |
+|-------------------|-------------|
+| `do(comm, work_dir)` | One-shot: `init()` + `calc()`. Common entry point. |
+| `init(comm, work_dir)` | Load libaims, call `aimspy_init`, wire callbacks. |
+| `calc()` | Run SCF. Raises `AimspyCallbackError` on callback failure. |
+| `close()` | Finalize. No-op in UNINIT/FINALIZED; raises in RUNNING. |
+| `force_close()` | Force-finalize from any state (swallows Fortran errors). |
+| `modify(source, *, strategy, factor, custom_fn, aux)` | Configure H0 modification (direct or deferred via decorator). |
+| `register_callback(name, fn, aux, extra_ptr)` | Register custom callback (`name`: `CallbackName` or `str`). |
+| `callback_registered(name)` | Check if a callback is registered. |
+| `info` | `AimspyInfo` — runtime snapshot (all ranks). |
+| `structure` | `AimspyStructure` — structure + orbital info (all ranks). |
+| `energy` | `float` — SCF total energy in Hartree (all ranks). |
+| `forces` | `Optional[np.ndarray]` `(n_atoms, 3)` — eV/Å (all ranks). |
+| `hamiltonian` | `AimspyMatrix` — converged H (rank 0). |
+| `overlap` | `AimspyMatrix` — live (if `capture_overlap`) or fallback (rank 0). |
+| `initial_hamiltonian` | `Optional[AimspyMatrix]` — free-atom H_init (if `capture_initial_hamiltonian`). |
+| `csr_descr` | `Optional[CsrMatrixDescriptor]` — CSR layout. |
+| `rs_hamiltonian` | `np.ndarray` — raw CSR flat (rank 0). |
+| `rs_overlap` | `np.ndarray` — raw overlap flat (rank 0). |
+| `work_dir`, `comm` | Execution context. |
+
+### `CalculatorConfig` — configuration dataclass
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `lib_path` | `Path` | required | Path to patched `libaims.so`. |
+| `control_path` | `Path` | `None` | Optional `control.in` to copy into `work_dir`. |
+| `geometry_path` | `Path` | `None` | Optional `geometry.in` to copy into `work_dir`. |
+| `initializer` | `callable` | `None` | `fn(Calculator) -> None` on rank 0 before `aimspy_init`. |
+| `log_level` | `str` | `"INFO"` | Python logging level. |
+| `logfile` | `Path` | `aims.out` | aims log file name. |
+| `capture_initial_hamiltonian` | `bool` | `False` | Enable `export_h0` callback. |
+| `capture_overlap` | `bool` | `False` | Enable `export_ovlp` callback (all-rank live overlap). |
+
+### `Strategy` — H0 modification enum
+
+| Value | Description |
+|-------|-------------|
+| `REPLACE` | Replace live H_init with external source. |
+| `ADD` | Add external source to live H_init. |
+| `SCALE` | Scale live H_init by `factor`. |
+| `CUSTOM` | Custom function `fn(live, external, structure, aux)`. |
+
+### `CallbackName` — callback type enum
+
+`GET_DESCR`, `EXPORT_OVLP`, `EXPORT_H0`, `MODIFY_H0`, `PYTHON_FUNC`.
+
+### `AimspyMatrix` — block-sparse matrix
+
+| Member | Description |
+|--------|-------------|
+| `blocks` | `dict[(R1,R2,R3,i_atom,j_atom), np.ndarray]` — Hartree, aims order. |
+| `n_spin` | `int` |
+| `n_pairs` | `int` — number of blocks. |
+| `from_aims_csr(h0, csr_descr, structure)` | Convert aims CSR flat → aimspy blocks. |
+| `to_aims_csr(csr_descr, structure)` | Convert aimspy blocks → aims CSR flat. |
+
+### `AimspyStructure` — structure + orbital descriptor
+
+| Member | Description |
+|--------|-------------|
+| `n_atoms`, `n_basis`, `n_spin`, `n_periodic` | Scalar dimensions. |
+| `lattice`, `atom_symbols`, `atom_coords` | Structure data. |
+| `basis_atom`, `basis_l`, `basis_m` | Per-basis-function orbital info. |
+| `phase_factor` | Wiki/DeepH parity (cached). |
+| `basis_subidx` | Per-atom orbital sub-index (cached). |
+| `orbit_per_atom` | Basis function count per atom (cached). |
+| `atom_permutation` | `(old2new, new2old)` aims↔POSCAR mapping (cached). |
+
+### `ExternalMatrixSource` — Protocol
+
+Any object with `to_aimspy(structure) -> AimspyMatrix` satisfies this protocol.
+`DeepHData` is the built-in implementation.
+
+### `DeepHData` — DeepH format reader/writer
+
+| Method | Description |
+|--------|-------------|
+| `from_directory(path)` | Read POSCAR + info.json + `.h5` files. |
+| `from_memory(...)` | Build from in-memory block dicts. |
+| `from_aimspy(structure, hamiltonian, overlap, initial_hamiltonian, template)` | Convert from aimspy format. |
+| `to_aimspy(structure)` | Convert to aimspy `AimspyMatrix` (satisfies `ExternalMatrixSource`). |
+| `set_hamiltonian(matrix, structure)` | Set H from `AimspyMatrix`. |
+| `set_overlap(matrix, structure)` | Set S from `AimspyMatrix`. |
+| `set_initial_hamiltonian(matrix, structure)` | Set H_init from `AimspyMatrix`. |
+| `save(path)` | Write all non-None content. |
+| `save_metadata(path)` | Write POSCAR + info.json only. |
+| `save_hamiltonian(path)` / `save_overlap(path)` / `save_initial_hamiltonian(path)` | Write individual `.h5` files. |
+
 ## Usage
 
 ### Baseline SCF
 
 ```python
+from mpi4py import MPI
 from aimspy import Calculator, CalculatorConfig
 
-with Calculator(CalculatorConfig(
-    lib_path="/path/to/libaims.so",
-    work_dir="./MoS2",
-)) as calc:
-    calc.run()
-    H = calc.hamiltonian     # AimspyMatrix
+config = CalculatorConfig(lib_path="/path/to/libaims.so")
+with Calculator(config) as calc:
+    calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
+    H = calc.hamiltonian     # AimspyMatrix (available by default)
     E = calc.energy          # float (Hartree)
 ```
 
 ### DeepH warmstart
 
-```python
-from aimspy.interface.deeph import DeepHData, DeepHSource
+**Direct source** — pre-built `DeepHData`:
 
-deeph_data = DeepHData.from_directory("deeph_warm/")
-calc.modify_h0(source=DeepHSource(deeph_data))
-calc.init(comm)
-calc.run()
+```python
+from mpi4py import MPI
+from aimspy import Calculator, CalculatorConfig, Strategy
+from aimspy.interface.deeph import DeepHData
+
+data = DeepHData.from_directory("deeph_warm/")
+config = CalculatorConfig(lib_path="/path/to/libaims.so")
+calc = Calculator(config)
+calc.modify(source=data, strategy=Strategy.REPLACE)
+calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
 # SCF converges in 1 iteration
 ```
+
+**Deferred source** — source generated at runtime during the
+`python_func` callback (after H0/overlap are available):
+
+```python
+config = CalculatorConfig(
+    lib_path="/path/to/libaims.so",
+    capture_initial_hamiltonian=True,  # enables calc.initial_hamiltonian
+)
+calc = Calculator(config)
+
+@calc.modify(strategy=Strategy.REPLACE, aux={"deeph_path": "deeph_warm/"})
+def gen_source(calculator, aux):
+    # calculator.initial_hamiltonian / .overlap available here
+    return DeepHData.from_directory(aux["deeph_path"])
+
+calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
+```
+
+Other strategies: `Strategy.ADD` (add external source to live H0),
+`Strategy.SCALE` (scale live H0 by `factor=`), `Strategy.CUSTOM`
+(custom function via `custom_fn=`).
 
 ### Export to DeepH format
 
 ```python
-calc.run()
-H_aimspy = calc.hamiltonian
-S_aimspy = calc.overlap
-H0 = calc.initial_hamiltonian  # requires calc.capture_h0 = True
-
+from mpi4py import MPI
+from aimspy import Calculator, CalculatorConfig
 from aimspy.interface.deeph import DeepHData
-dd = DeepHData.from_aimspy(calc.structure, H=H_aimspy, S=S_aimspy, H0=H0)
-dd.save("deeph_out/")
+
+config = CalculatorConfig(
+    lib_path="/path/to/libaims.so",
+    capture_initial_hamiltonian=True,   # opt in to free-atom H_init capture
+)
+with Calculator(config) as calc:
+    calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
+    hamiltonian = calc.hamiltonian
+    overlap = calc.overlap
+    initial_hamiltonian = calc.initial_hamiltonian  # available because
+                                                    # capture_initial_hamiltonian=True
+
+    dd = DeepHData.from_aimspy(
+        calc.structure,
+        hamiltonian=hamiltonian,
+        overlap=overlap,
+        initial_hamiltonian=initial_hamiltonian,
+    )
+    dd.save("deeph_out/")
 ```
+
+### Advanced usage
+
+**Error recovery** — if SCF crashes, use `force_close()` then create a new
+Calculator:
+
+```python
+calc = Calculator(CalculatorConfig(lib_path="..."))
+try:
+    calc.do(comm=MPI.COMM_WORLD, work_dir="./bad_input")
+except Exception:
+    calc.force_close()  # always works, swallows Fortran errors
+    # create a new Calculator for the next run
+```
+
+**Custom strategy** — modify H0 with a user function:
+
+```python
+import numpy as np
+
+def zero_offsite(live, external, structure, aux):
+    """Zero out all non-self-pair blocks."""
+    for key in list(live.blocks.keys()):
+        R1, R2, R3, i, j = key
+        if (R1, R2, R3) != (0, 0, 0) or i != j:
+            live.blocks[key] = np.zeros_like(live.blocks[key])
+
+calc.modify(strategy=Strategy.CUSTOM, custom_fn=zero_offsite)
+```
+
+**Register callback** (enum or string, before or after init):
+
+```python
+from aimspy import CallbackName
+
+calc.register_callback(CallbackName.EXPORT_H0, my_export_fn, aux={})
+# or: calc.register_callback("export_h0", my_export_fn, aux={})
+```
+
+**Logging**: INFO/WARNING on rank 0 only; ERROR on all ranks.
 
 ## Development
 

@@ -2,76 +2,165 @@
 
 Provides ``DeepHData``, a complete in-memory representation of DeepH
 data including structure info (from POSCAR / info.json) and matrix
-data (from hamiltonian.h5 / overlap.h5 / hamiltonian0.h5).
-Supports file I/O, in-memory construction, and conversion from
-aimspy standard format via ``from_aimspy``.
+data (from hamiltonian.h5 / overlap.h5 / hamiltonian_init.h5).
+Supports file I/O, in-memory construction, conversion from
+aimspy standard format via ``from_aimspy``, and conversion to
+aimspy standard format via ``to_aimspy``.
 """
+
 from __future__ import annotations
 
 import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import h5py
 import numpy as np
 
-from ...data import HARTREE_TO_EV
+from ...data import EV_TO_HARTREE, HARTREE_TO_EV
+from ..._exceptions import AimspyConfigError
 
+if TYPE_CHECKING:
+    from ...matrix import AimspyMatrix
+    from ...structure import AimspyStructure
 
 # -------------------------------------------------------------------
 # Atomic-number lookup (for occupation computation in info.json)
 # -------------------------------------------------------------------
 _ATOMIC_NUMBERS: dict[str, int] = {
-    "H": 1,   "He": 2,  "Li": 3,  "Be": 4,  "B": 5,   "C": 6,
-    "N": 7,   "O": 8,   "F": 9,   "Ne": 10, "Na": 11, "Mg": 12,
-    "Al": 13, "Si": 14, "P": 15,  "S": 16,  "Cl": 17, "Ar": 18,
-    "K": 19,  "Ca": 20, "Sc": 21, "Ti": 22, "V": 23,  "Cr": 24,
-    "Mn": 25, "Fe": 26, "Co": 27, "Ni": 28, "Cu": 29, "Zn": 30,
-    "Ga": 31, "Ge": 32, "As": 33, "Se": 34, "Br": 35, "Kr": 36,
-    "Rb": 37, "Sr": 38, "Y": 39,  "Zr": 40, "Nb": 41, "Mo": 42,
-    "Tc": 43, "Ru": 44, "Rh": 45, "Pd": 46, "Ag": 47, "Cd": 48,
-    "In": 49, "Sn": 50, "Sb": 51, "Te": 52, "I": 53,  "Xe": 54,
-    "Cs": 55, "Ba": 56, "La": 57, "Ce": 58, "Pr": 59, "Nd": 60,
-    "Pm": 61, "Sm": 62, "Eu": 63, "Gd": 64, "Tb": 65, "Dy": 66,
-    "Ho": 67, "Er": 68, "Tm": 69, "Yb": 70, "Lu": 71, "Hf": 72,
-    "Ta": 73, "W": 74,  "Re": 75, "Os": 76, "Ir": 77, "Pt": 78,
-    "Au": 79, "Hg": 80, "Tl": 81, "Pb": 82, "Bi": 83, "Po": 84,
-    "At": 85, "Rn": 86, "Fr": 87, "Ra": 88, "Ac": 89, "Th": 90,
-    "Pa": 91, "U": 92,  "Np": 93, "Pu": 94, "Am": 95, "Cm": 96,
-    "Bk": 97, "Cf": 98, "Es": 99, "Fm": 100, "Md": 101, "No": 102,
-    "Lr": 103, "Rf": 104, "Db": 105, "Sg": 106, "Bh": 107, "Hs": 108,
-    "Mt": 109, "Ds": 110, "Rg": 111, "Cn": 112, "Nh": 113, "Fl": 114,
-    "Mc": 115, "Lv": 116, "Ts": 117, "Og": 118,
+    "H": 1,
+    "He": 2,
+    "Li": 3,
+    "Be": 4,
+    "B": 5,
+    "C": 6,
+    "N": 7,
+    "O": 8,
+    "F": 9,
+    "Ne": 10,
+    "Na": 11,
+    "Mg": 12,
+    "Al": 13,
+    "Si": 14,
+    "P": 15,
+    "S": 16,
+    "Cl": 17,
+    "Ar": 18,
+    "K": 19,
+    "Ca": 20,
+    "Sc": 21,
+    "Ti": 22,
+    "V": 23,
+    "Cr": 24,
+    "Mn": 25,
+    "Fe": 26,
+    "Co": 27,
+    "Ni": 28,
+    "Cu": 29,
+    "Zn": 30,
+    "Ga": 31,
+    "Ge": 32,
+    "As": 33,
+    "Se": 34,
+    "Br": 35,
+    "Kr": 36,
+    "Rb": 37,
+    "Sr": 38,
+    "Y": 39,
+    "Zr": 40,
+    "Nb": 41,
+    "Mo": 42,
+    "Tc": 43,
+    "Ru": 44,
+    "Rh": 45,
+    "Pd": 46,
+    "Ag": 47,
+    "Cd": 48,
+    "In": 49,
+    "Sn": 50,
+    "Sb": 51,
+    "Te": 52,
+    "I": 53,
+    "Xe": 54,
+    "Cs": 55,
+    "Ba": 56,
+    "La": 57,
+    "Ce": 58,
+    "Pr": 59,
+    "Nd": 60,
+    "Pm": 61,
+    "Sm": 62,
+    "Eu": 63,
+    "Gd": 64,
+    "Tb": 65,
+    "Dy": 66,
+    "Ho": 67,
+    "Er": 68,
+    "Tm": 69,
+    "Yb": 70,
+    "Lu": 71,
+    "Hf": 72,
+    "Ta": 73,
+    "W": 74,
+    "Re": 75,
+    "Os": 76,
+    "Ir": 77,
+    "Pt": 78,
+    "Au": 79,
+    "Hg": 80,
+    "Tl": 81,
+    "Pb": 82,
+    "Bi": 83,
+    "Po": 84,
+    "At": 85,
+    "Rn": 86,
+    "Fr": 87,
+    "Ra": 88,
+    "Ac": 89,
+    "Th": 90,
+    "Pa": 91,
+    "U": 92,
+    "Np": 93,
+    "Pu": 94,
+    "Am": 95,
+    "Cm": 96,
+    "Bk": 97,
+    "Cf": 98,
+    "Es": 99,
+    "Fm": 100,
+    "Md": 101,
+    "No": 102,
+    "Lr": 103,
+    "Rf": 104,
+    "Db": 105,
+    "Sg": 106,
+    "Bh": 107,
+    "Hs": 108,
+    "Mt": 109,
+    "Ds": 110,
+    "Rg": 111,
+    "Cn": 112,
+    "Nh": 113,
+    "Fl": 114,
+    "Mc": 115,
+    "Lv": 116,
+    "Ts": 117,
+    "Og": 118,
 }
 
 
 # -------------------------------------------------------------------
-# Conversion helpers (shared with converter.py)
+# Conversion helpers
 # -------------------------------------------------------------------
-def _map_to_center_cell(
-    coords: np.ndarray, lattice: np.ndarray, eps: float = 1e-8
-) -> np.ndarray:
-    """Map periodic positions to the cell centred at origin.
-
-    Mimics FHI-aims ``map_to_center_cell`` and DeepH-reference
-    ``_map_positions_to_center_cell``.
-    """
-    inv = np.linalg.inv(lattice)
-    frac = coords @ inv
-    frac = frac - eps
-    frac = frac - np.rint(frac)
-    frac = frac + eps
-    return frac @ lattice
-
-
-def _aimspy_blocks_to_poscar(
-    matrix, structure
-) -> dict[tuple, np.ndarray]:
+def _aimspy_blocks_to_poscar(matrix, structure) -> dict[tuple, np.ndarray]:
     """Reorder aimspy blocks (aims atom order) to POSCAR atom order.
 
     Returns a new dict (blocks are NOT copied — caller must copy if needed).
+
+    Raises ``RuntimeError`` if duplicate keys are encountered (should be
+    impossible since ``build_atom_permutation`` is a bijection).
     """
     old2new, _ = structure.build_atom_permutation()
     pair_blocks: dict[tuple, np.ndarray] = {}
@@ -80,14 +169,46 @@ def _aimspy_blocks_to_poscar(
         j_deeph = int(old2new[j_aims])
         key = (R1, R2, R3, i_deeph, j_deeph)
         if key not in pair_blocks:
-            pair_blocks[key] = block  # reference, no copy
+            pair_blocks[key] = block
         else:
-            pair_blocks[key] = np.maximum(pair_blocks[key], block)
+            raise RuntimeError(
+                f"_aimspy_blocks_to_poscar: duplicate key {key} "
+                f"(indicates a bug in build_atom_permutation or matrix.blocks)"
+            )
     return pair_blocks
 
 
+def _blocks_to_flat_entries(
+    blocks: dict[tuple[int, ...], np.ndarray],
+    atom_pairs: np.ndarray,
+    chunk_boundaries: np.ndarray,
+    chunk_shapes: np.ndarray,
+    factor: float = 1.0,
+) -> np.ndarray:
+    """Flatten a blocks dict to 1D entries following the existing CSR layout.
+
+    Iterates over ``atom_pairs`` order, looks up each block by its key,
+    flattens to 1D and concatenates. Missing blocks are zero-filled.
+    """
+    n_pairs = atom_pairs.shape[0]
+    lst: list[np.ndarray] = []
+    for ip in range(n_pairs):
+        key = tuple(int(x) for x in atom_pairs[ip])
+        nr = int(chunk_shapes[ip, 0])
+        nc = int(chunk_shapes[ip, 1])
+        blk = blocks.get(key)
+        if blk is not None:
+            lst.append(np.ascontiguousarray(blk, dtype=np.float64).ravel())
+        else:
+            lst.append(np.zeros(nr * nc, dtype=np.float64))
+    entries = np.concatenate(lst) if lst else np.array([], dtype=np.float64)
+    if factor != 1.0:
+        entries *= factor
+    return entries
+
+
 def _reorder_coords(structure) -> np.ndarray:
-    """Return atom coords in POSCAR (element‑grouped) order."""
+    """Return atom coords in POSCAR (element-grouped) order."""
     _, new2old = structure.build_atom_permutation()
     n = structure.n_atoms
     coords = np.zeros((n, 3), dtype=np.float64)
@@ -102,7 +223,7 @@ def _build_elements_orbital_map(structure) -> dict[str, list[int]]:
 
     Matches the reference ``_parse_basis`` behaviour: record an entry
     when ``m == -l`` (first *m* of each shell), keeping duplicates for
-    same-*l*-different-*n* shells (e.g. two s‑shells → ``[0, 0, 1, …]``).
+    same-*l*-different-*n* shells (e.g. two s-shells → ``[0, 0, 1, …]``).
     """
     result: dict[str, list[int]] = {}
     for idx in range(structure.n_atoms):
@@ -111,11 +232,11 @@ def _build_elements_orbital_map(structure) -> dict[str, list[int]]:
         indices = np.where(mask)[0]
         ls_for_atom: list[int] = []
         for i in indices:
-            l = int(structure.basis_l[i])
+            ll = int(structure.basis_l[i])
             m = int(structure.basis_m[i])
-            if m == -l:
-                ls_for_atom.append(l)
-        result[elem] = ls_for_atom   # overwrite — same element ⇒ same basis
+            if m == -ll:
+                ls_for_atom.append(ll)
+        result[elem] = ls_for_atom  # overwrite — same element ⇒ same basis
     return result
 
 
@@ -128,7 +249,7 @@ def _compute_n_basis(
     n = 0
     for elem, cnt in counts.items():
         shells = elements_orbital_map.get(elem, [])
-        n += cnt * sum(2 * l + 1 for l in shells)
+        n += cnt * sum(2 * ll + 1 for ll in shells)
     return n
 
 
@@ -149,58 +270,73 @@ class DeepHData:
       - ``info.json``       — ``elements_orbital_map``
       - ``hamiltonian.h5``  — *required* — atom_pairs, chunk_*, entries (eV)
       - ``overlap.h5``      — *optional* — same layout, overlap entries
-      - ``hamiltonian0.h5`` — *optional* — same layout, initial H0 entries
+      - ``hamiltonian_init.h5`` — *optional* — same layout, initial Hamiltonian
+        entries (the ``0`` in the filename denotes the initial Hamiltonian,
+        per DeepH on-disk convention)
 
     Can also be constructed in-memory via ``from_memory`` or from
     aimspy standard-format matrices via ``from_aimspy``.
     """
 
-    # structure (POSCAR order = element‑grouped)
-    lattice: np.ndarray                      # (3, 3) in Angstrom
-    atom_symbols: list[str]                  # POSCAR order
-    atom_coords: np.ndarray                  # (n_atoms, 3) in Angstrom
+    # structure (POSCAR order = element-grouped)
+    lattice: np.ndarray  # (3, 3) in Angstrom
+    atom_symbols: list[str]  # POSCAR order
+    atom_coords: np.ndarray  # (n_atoms, 3) in Angstrom
     elements_orbital_map: dict[str, list[int]]
-    n_basis: int                             # total number of basis functions
+    n_basis: int  # total number of basis functions
 
     # shared CSR layout (same for all matrices)
-    atom_pairs: np.ndarray                  # (N, 5)  [R1,R2,R3,i,j]
-    chunk_boundaries: np.ndarray            # (N+1,)
-    chunk_shapes: np.ndarray                # (N, 2)
+    atom_pairs: np.ndarray  # (N, 5)  [R1,R2,R3,i,j]
+    chunk_boundaries: np.ndarray  # (N+1,)
+    chunk_shapes: np.ndarray  # (N, 2)
 
-    # H entries (eV), *always* present
-    entries: np.ndarray                     # (M,) float64, eV
-
-    # optional additional matrices (eV)
+    # Hamiltonian entries (eV) — optional to support overlap-only scenarios
+    entries: Optional[np.ndarray] = None  # (M,) float64, eV
+    # optional additional matrices
     overlap_entries: Optional[np.ndarray] = None
     initial_hamiltonian_entries: Optional[np.ndarray] = None
 
     # metadata (for info.json round-trip)
     fermi_energy_eV: float = 0.0
 
+    # pre-specified save path (set by from_directory / from_aimspy / path= kwarg)
+    path: Optional[Path] = None
+
     # ----------------------------------------------------------------
     # Construction from directory
     # ----------------------------------------------------------------
     @classmethod
     def from_directory(cls, path: Union[str, Path]) -> "DeepHData":
-        """Read POSCAR + info.json + hamiltonian.h5 from *path*.
+        """Read POSCAR + info.json + matrix .h5 files from *path*.
 
-        Optionally also reads ``overlap.h5`` and ``hamiltonian0.h5``
-        if they exist.
+        Requires POSCAR + info.json + at least one matrix file
+        (``hamiltonian.h5``, ``overlap.h5``, or ``hamiltonian_init.h5``).
+        Sets ``self.path = path`` for subsequent ``save_*()`` calls.
         """
         path = Path(path)
         if not path.is_dir():
             raise FileNotFoundError(f"DeepH directory not found: {path}")
 
         poscar_path = path / "POSCAR"
-        info_path   = path / "info.json"
-        h5_path     = path / "hamiltonian.h5"
+        info_path = path / "info.json"
 
         if not poscar_path.is_file():
             raise FileNotFoundError(f"POSCAR missing in {path}")
         if not info_path.is_file():
             raise FileNotFoundError(f"info.json missing in {path}")
-        if not h5_path.is_file():
-            raise FileNotFoundError(f"hamiltonian.h5 missing in {path}")
+
+        # Detect available matrix files
+        matrix_files: list[tuple[str, Path]] = [
+            ("hamiltonian", path / "hamiltonian.h5"),
+            ("overlap", path / "overlap.h5"),
+            ("initial_hamiltonian", path / "hamiltonian_init.h5"),
+        ]
+        found = [(name, p) for name, p in matrix_files if p.is_file()]
+        if not found:
+            raise FileNotFoundError(
+                f"No matrix .h5 file found in {path} "
+                "(expected hamiltonian.h5, overlap.h5, or hamiltonian_init.h5)"
+            )
 
         lattice, atom_symbols, atom_coords = _read_poscar(poscar_path)
         with open(info_path, "r") as f:
@@ -211,23 +347,26 @@ class DeepHData:
             n_basis = _compute_n_basis(atom_symbols, eom)
         fermi_eV = info.get("fermi_energy_eV", 0.0)
 
-        with h5py.File(h5_path, "r") as f:
+        # Read CSR layout from the first found file
+        first_name, first_path = found[0]
+        with h5py.File(first_path, "r") as f:
             atom_pairs = f["atom_pairs"][:].astype(np.int32)
             cb = f["chunk_boundaries"][:].astype(np.int32)
             cs = f["chunk_shapes"][:].astype(np.int32)
-            entries = f["entries"][:].astype(np.float64)
 
+        # Read each matrix
+        entries = None
         overlap_entries = None
-        ovlp_path = path / "overlap.h5"
-        if ovlp_path.is_file():
-            with h5py.File(ovlp_path, "r") as f:
-                overlap_entries = f["entries"][:].astype(np.float64)
-
         init_entries = None
-        h0_path = path / "hamiltonian0.h5"
-        if h0_path.is_file():
-            with h5py.File(h0_path, "r") as f:
-                init_entries = f["entries"][:].astype(np.float64)
+        for name, p in found:
+            with h5py.File(p, "r") as f:
+                data = f["entries"][:].astype(np.float64)
+            if name == "hamiltonian":
+                entries = data
+            elif name == "overlap":
+                overlap_entries = data
+            elif name == "initial_hamiltonian":
+                init_entries = data
 
         return cls(
             lattice=lattice,
@@ -242,6 +381,7 @@ class DeepHData:
             overlap_entries=overlap_entries,
             initial_hamiltonian_entries=init_entries,
             fermi_energy_eV=fermi_eV,
+            path=path,
         )
 
     @classmethod
@@ -251,38 +391,43 @@ class DeepHData:
         atom_symbols: list[str],
         atom_coords: np.ndarray,
         elements_orbital_map: dict[str, list[int]],
-        pair_blocks: dict[tuple[int, ...], np.ndarray],
+        hamiltonian_blocks: Optional[dict[tuple[int, ...], np.ndarray]] = None,
         overlap_blocks: Optional[dict[tuple[int, ...], np.ndarray]] = None,
-        h0_blocks: Optional[dict[tuple[int, ...], np.ndarray]] = None,
+        initial_hamiltonian_blocks: Optional[dict[tuple[int, ...], np.ndarray]] = None,
         n_basis: int = 0,
         fermi_energy_eV: float = 0.0,
+        path: Optional[Union[str, Path]] = None,
     ) -> "DeepHData":
         """Build from in-memory pair-block dicts.
 
-        ``pair_blocks`` keys are ``(R1,R2,R3,i,j)`` with atoms in
-        POSCAR order.  Block values are in **Hartree** (converted to eV
-        here).  Overlap blocks are dimensionless — no unit conversion.
+        All matrix blocks are optional — at least one must be given.
+        Keys are ``(R1,R2,R3,i,j)`` with atoms in POSCAR order.
+        Hamiltonian / initial_hamiltonian blocks in **Hartree**
+        (converted to eV here). Overlap blocks are dimensionless.
         """
         if n_basis == 0:
             n_basis = _compute_n_basis(atom_symbols, elements_orbital_map)
-        sorted_keys = sorted(pair_blocks.keys())
+        layout_blocks = (
+            hamiltonian_blocks or overlap_blocks or initial_hamiltonian_blocks
+        )
+        if layout_blocks is None:
+            raise AimspyConfigError("At least one matrix blocks dict must be provided")
+        sorted_keys = sorted(layout_blocks.keys())
         n_pairs = len(sorted_keys)
         atom_pairs = np.zeros((n_pairs, 5), dtype=np.int32)
         chunk_boundaries = np.zeros((n_pairs + 1,), dtype=np.int32)
         chunk_shapes = np.zeros((n_pairs, 2), dtype=np.int32)
         entries_lst: list[np.ndarray] = []
         overlap_lst: list[np.ndarray] = []
-        h0_lst: list[np.ndarray] = []
+        init_ham_lst: list[np.ndarray] = []
 
         for ip, key in enumerate(sorted_keys):
             atom_pairs[ip] = [int(k) for k in key]
-            block = pair_blocks[key]
+            block = layout_blocks[key]
             nr, nc = int(block.shape[0]), int(block.shape[1])
             chunk_shapes[ip] = (nr, nc)
 
-            entries_lst.append(
-                np.ascontiguousarray(block, dtype=np.float64).ravel()
-            )
+            entries_lst.append(np.ascontiguousarray(block, dtype=np.float64).ravel())
             chunk_boundaries[ip + 1] = chunk_boundaries[ip] + nr * nc
 
             if overlap_blocks is not None:
@@ -294,21 +439,19 @@ class DeepHData:
                 else:
                     overlap_lst.append(np.zeros(nr * nc, dtype=np.float64))
 
-            if h0_blocks is not None:
-                blk = h0_blocks.get(key)
+            if initial_hamiltonian_blocks is not None:
+                blk = initial_hamiltonian_blocks.get(key)
                 if blk is not None:
-                    h0_lst.append(
+                    init_ham_lst.append(
                         np.ascontiguousarray(blk, dtype=np.float64).ravel()
                     )
                 else:
-                    h0_lst.append(np.zeros(nr * nc, dtype=np.float64))
+                    init_ham_lst.append(np.zeros(nr * nc, dtype=np.float64))
 
-        entries = (
-            np.concatenate(entries_lst)
-            if entries_lst
-            else np.array([], dtype=np.float64)
-        )
-        entries *= HARTREE_TO_EV  # Hartree → eV
+        entries = None
+        if hamiltonian_blocks is not None:
+            entries = np.concatenate(entries_lst)
+            entries *= HARTREE_TO_EV  # Hartree → eV
 
         ovlp = None
         if overlap_lst:
@@ -316,8 +459,8 @@ class DeepHData:
             # Overlap is dimensionless — no unit conversion
 
         init = None
-        if h0_lst:
-            init = np.concatenate(h0_lst)
+        if init_ham_lst:
+            init = np.concatenate(init_ham_lst)
             init *= HARTREE_TO_EV  # Hartree → eV
 
         return cls(
@@ -333,6 +476,7 @@ class DeepHData:
             overlap_entries=ovlp,
             initial_hamiltonian_entries=init,
             fermi_energy_eV=fermi_energy_eV,
+            path=Path(path) if path is not None else None,
         )
 
     # ----------------------------------------------------------------
@@ -342,29 +486,36 @@ class DeepHData:
     def from_aimspy(
         cls,
         structure,
-        H,
-        S=None,
-        H0=None,
+        hamiltonian=None,
+        overlap=None,
+        initial_hamiltonian=None,
         template: Optional["DeepHData"] = None,
+        path: Optional[Union[str, Path]] = None,
     ) -> "DeepHData":
         """Build from aimspy standard-format matrices + structure.
+
+        All matrices are optional — at least one must be given.
 
         Parameters
         ----------
         structure : AimspyStructure
             Used to build POSCAR-order layout unless *template* is given.
-        H : AimspyMatrix
+        hamiltonian : AimspyMatrix, optional
             Hamiltonian (Hartree, aims atom order).
-        S : AimspyMatrix, optional
+        overlap : AimspyMatrix, optional
             Overlap matrix (dimensionless).
-        H0 : AimspyMatrix, optional
+        initial_hamiltonian : AimspyMatrix, optional
             Initial / free-atom Hamiltonian (Hartree).
         template : DeepHData, optional
             If given, reuse its structure fields (lattice, atom_symbols,
             atom_coords, elements_orbital_map) instead of rebuilding
             from *structure*.  Convenient when adding matrices to an
             existing DeepH dataset.
+        path : str or Path, optional
+            Pre-specified save path for subsequent ``save_*()`` calls.
         """
+        if hamiltonian is None and overlap is None and initial_hamiltonian is None:
+            raise AimspyConfigError("At least one matrix must be provided")
         if template is not None:
             lattice = template.lattice.copy()
             atom_symbols = list(template.atom_symbols)
@@ -376,19 +527,25 @@ class DeepHData:
             lattice = structure.lattice.copy()
             atom_symbols = list(structure.atoms_species_sorted)
             coords = _reorder_coords(structure)
-            if structure.n_periodic > 0 and lattice.size >= 9:
-                coords = _map_to_center_cell(coords, lattice)
             atom_coords = coords
             eom = _build_elements_orbital_map(structure)
             n_basis = structure.n_basis
             fermi_eV = 0.0
 
-        pair_blocks_H = _aimspy_blocks_to_poscar(H, structure)
-        pair_blocks_S = (
-            _aimspy_blocks_to_poscar(S, structure) if S is not None else None
+        hamiltonian_blocks = (
+            _aimspy_blocks_to_poscar(hamiltonian, structure)
+            if hamiltonian is not None
+            else None
         )
-        pair_blocks_H0 = (
-            _aimspy_blocks_to_poscar(H0, structure) if H0 is not None else None
+        overlap_blocks = (
+            _aimspy_blocks_to_poscar(overlap, structure)
+            if overlap is not None
+            else None
+        )
+        initial_hamiltonian_blocks = (
+            _aimspy_blocks_to_poscar(initial_hamiltonian, structure)
+            if initial_hamiltonian is not None
+            else None
         )
 
         return cls.from_memory(
@@ -396,69 +553,116 @@ class DeepHData:
             atom_symbols=atom_symbols,
             atom_coords=atom_coords,
             elements_orbital_map=eom,
-            pair_blocks=pair_blocks_H,
-            overlap_blocks=pair_blocks_S,
-            h0_blocks=pair_blocks_H0,
+            hamiltonian_blocks=hamiltonian_blocks,
+            overlap_blocks=overlap_blocks,
+            initial_hamiltonian_blocks=initial_hamiltonian_blocks,
             n_basis=n_basis,
             fermi_energy_eV=fermi_eV,
+            path=path,
         )
 
     # ----------------------------------------------------------------
-    # I/O
+    # Set individual matrices from AimspyMatrix
     # ----------------------------------------------------------------
-    def save(self, path: Union[str, Path]) -> None:
-        """Write POSCAR + info.json + hamiltonian.h5 to *path*.
-
-        Also writes ``overlap.h5`` and ``hamiltonian0.h5`` when the
-        corresponding optional fields are populated.
-        """
-        path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
-        _write_poscar(
-            path / "POSCAR", self.lattice, self.atom_symbols, self.atom_coords
+    def set_hamiltonian(
+        self, matrix: "AimspyMatrix", structure: "AimspyStructure"
+    ) -> None:
+        """Convert and store Hamiltonian entries (eV) from *matrix*."""
+        blocks = _aimspy_blocks_to_poscar(matrix, structure)
+        self.entries = _blocks_to_flat_entries(
+            blocks,
+            self.atom_pairs,
+            self.chunk_boundaries,
+            self.chunk_shapes,
+            factor=HARTREE_TO_EV,
         )
-        _write_info_json(path / "info.json", self)
-        with h5py.File(path / "hamiltonian.h5", "w") as f:
+
+    def set_overlap(self, matrix: "AimspyMatrix", structure: "AimspyStructure") -> None:
+        """Convert and store overlap entries (dimensionless) from *matrix*."""
+        blocks = _aimspy_blocks_to_poscar(matrix, structure)
+        self.overlap_entries = _blocks_to_flat_entries(
+            blocks,
+            self.atom_pairs,
+            self.chunk_boundaries,
+            self.chunk_shapes,
+        )
+
+    def set_initial_hamiltonian(
+        self, matrix: "AimspyMatrix", structure: "AimspyStructure"
+    ) -> None:
+        """Convert and store initial Hamiltonian entries (eV) from *matrix*."""
+        blocks = _aimspy_blocks_to_poscar(matrix, structure)
+        self.initial_hamiltonian_entries = _blocks_to_flat_entries(
+            blocks,
+            self.atom_pairs,
+            self.chunk_boundaries,
+            self.chunk_shapes,
+            factor=HARTREE_TO_EV,
+        )
+
+    # ----------------------------------------------------------------
+    # Save individual matrices / metadata
+    # ----------------------------------------------------------------
+    def _require_path(self) -> Path:
+        if self.path is None:
+            raise AimspyConfigError(
+                "No path specified; pass path= to constructor or save_*()"
+            )
+        return self.path
+
+    def _write_matrix_h5(self, file_path: Path, entries: np.ndarray) -> None:
+        with h5py.File(file_path, "w") as f:
             f.create_dataset("atom_pairs", data=self.atom_pairs, dtype="i4")
-            f.create_dataset(
-                "chunk_boundaries", data=self.chunk_boundaries, dtype="i4"
-            )
-            f.create_dataset(
-                "chunk_shapes", data=self.chunk_shapes, dtype="i4"
-            )
-            f.create_dataset("entries", data=self.entries)
+            f.create_dataset("chunk_boundaries", data=self.chunk_boundaries, dtype="i4")
+            f.create_dataset("chunk_shapes", data=self.chunk_shapes, dtype="i4")
+            f.create_dataset("entries", data=entries)
 
+    def save_metadata(self, path: Optional[Union[str, Path]] = None) -> None:
+        """Write POSCAR + info.json to *path* (default: self.path)."""
+        p = Path(path) if path is not None else self._require_path()
+        p.mkdir(parents=True, exist_ok=True)
+        _write_poscar(p / "POSCAR", self.lattice, self.atom_symbols, self.atom_coords)
+        _write_info_json(p / "info.json", self)
+
+    def save_hamiltonian(self, path: Optional[Union[str, Path]] = None) -> None:
+        """Write hamiltonian.h5 (requires entries to be set)."""
+        if self.entries is None:
+            raise ValueError("No Hamiltonian entries to save")
+        p = Path(path) if path is not None else self._require_path()
+        p.mkdir(parents=True, exist_ok=True)
+        self._write_matrix_h5(p / "hamiltonian.h5", self.entries)
+
+    def save_overlap(self, path: Optional[Union[str, Path]] = None) -> None:
+        """Write overlap.h5 (requires overlap_entries to be set)."""
+        if self.overlap_entries is None:
+            raise ValueError("No overlap entries to save")
+        p = Path(path) if path is not None else self._require_path()
+        p.mkdir(parents=True, exist_ok=True)
+        self._write_matrix_h5(p / "overlap.h5", self.overlap_entries)
+
+    def save_initial_hamiltonian(self, path: Optional[Union[str, Path]] = None) -> None:
+        """Write hamiltonian_init.h5 (requires initial_hamiltonian_entries)."""
+        if self.initial_hamiltonian_entries is None:
+            raise ValueError("No initial Hamiltonian entries to save")
+        p = Path(path) if path is not None else self._require_path()
+        p.mkdir(parents=True, exist_ok=True)
+        self._write_matrix_h5(
+            p / "hamiltonian_init.h5", self.initial_hamiltonian_entries
+        )
+
+    def save(self, path: Optional[Union[str, Path]] = None) -> None:
+        """Write all non-None content to *path* (default: self.path).
+
+        Saves POSCAR + info.json + every matrix that has been set.
+        """
+        p = Path(path) if path is not None else self._require_path()
+        self.save_metadata(p)
+        if self.entries is not None:
+            self.save_hamiltonian(p)
         if self.overlap_entries is not None:
-            with h5py.File(path / "overlap.h5", "w") as f:
-                f.create_dataset(
-                    "atom_pairs", data=self.atom_pairs, dtype="i4"
-                )
-                f.create_dataset(
-                    "chunk_boundaries",
-                    data=self.chunk_boundaries,
-                    dtype="i4",
-                )
-                f.create_dataset(
-                    "chunk_shapes", data=self.chunk_shapes, dtype="i4"
-                )
-                f.create_dataset("entries", data=self.overlap_entries)
-
+            self.save_overlap(p)
         if self.initial_hamiltonian_entries is not None:
-            with h5py.File(path / "hamiltonian0.h5", "w") as f:
-                f.create_dataset(
-                    "atom_pairs", data=self.atom_pairs, dtype="i4"
-                )
-                f.create_dataset(
-                    "chunk_boundaries",
-                    data=self.chunk_boundaries,
-                    dtype="i4",
-                )
-                f.create_dataset(
-                    "chunk_shapes", data=self.chunk_shapes, dtype="i4"
-                )
-                f.create_dataset(
-                    "entries", data=self.initial_hamiltonian_entries
-                )
+            self.save_initial_hamiltonian(p)
 
     @property
     def n_pairs(self) -> int:
@@ -470,10 +674,12 @@ class DeepHData:
 
     def __repr__(self) -> str:
         extra = []
+        if self.entries is not None:
+            extra.append("+H")
         if self.overlap_entries is not None:
             extra.append("+S")
         if self.initial_hamiltonian_entries is not None:
-            extra.append("+H0")
+            extra.append("+H_init")
         tag = " ".join(extra)
         return (
             f"DeepHData(n_atoms={self.n_atoms}, n_pairs={self.n_pairs}"
@@ -481,12 +687,72 @@ class DeepHData:
             + f", species={list(self.atom_symbols)})"
         )
 
+    # ----------------------------------------------------------------
+    # Conversion to aimspy standard format
+    # ----------------------------------------------------------------
+    def to_aimspy(self, structure: "AimspyStructure") -> "AimspyMatrix":
+        """Convert this DeepH data to aimspy standard format.
+
+        Converts the Hamiltonian entries (``self.entries``). If
+        ``entries`` is None, raises :class:`aimspy.AimspyConfigError`.
+
+        - Atom reordering: POSCAR → aims (via stable-sort un-permutation)
+        - R: no flip (same convention: ``R_aimspy = R_deeph = -R_aims``)
+        - Parity: no change (same wiki convention)
+        - Units: eV → Hartree
+
+        The result is suitable for passing to
+        :meth:`aimspy.Calculator.modify` via ``source=``.
+
+        Parameters
+        ----------
+        structure : AimspyStructure
+            Live runtime structure (built from ``AimspyInfo`` after
+            ``aimspy_init``); provides the POSCAR↔aims atom permutation.
+        """
+        from ...matrix import AimspyMatrix
+
+        if self.entries is None:
+            raise AimspyConfigError(
+                "No Hamiltonian entries to convert; set entries first"
+            )
+        _, new2old = structure.build_atom_permutation()
+        # new2old[POSCAR_atom] = aims_atom
+
+        entries = self.entries
+        cb = self.chunk_boundaries
+        cs = self.chunk_shapes
+        ap = self.atom_pairs
+
+        blocks: dict = {}
+        for ip in range(self.n_pairs):
+            R1 = int(ap[ip, 0])
+            R2 = int(ap[ip, 1])
+            R3 = int(ap[ip, 2])
+            i_deeph = int(ap[ip, 3])
+            j_deeph = int(ap[ip, 4])
+
+            i_aims = int(new2old[i_deeph])
+            j_aims = int(new2old[j_deeph])
+
+            bnd = int(cb[ip])
+            nr = int(cs[ip, 0])
+            nc = int(cs[ip, 1])
+
+            block = entries[bnd : bnd + nr * nc].reshape(nr, nc).copy()
+            block *= EV_TO_HARTREE  # eV -> Hartree
+
+            key = (R1, R2, R3, i_aims, j_aims)
+            blocks[key] = block
+
+        return AimspyMatrix(blocks=blocks, n_spin=1)
+
 
 # -------------------------------------------------------------------
 # Internal: POSCAR reader / writer
 # -------------------------------------------------------------------
 def _read_poscar(path: Path) -> tuple[np.ndarray, list[str], np.ndarray]:
-    """Minimal POSCAR parser (VASP4 + VASP5 element‑line formats)."""
+    """Minimal POSCAR parser (VASP4 + VASP5 element-line formats)."""
     lines = path.read_text().splitlines()
     lines = [ln.strip() for ln in lines if ln.strip()]
 

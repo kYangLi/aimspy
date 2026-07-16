@@ -174,10 +174,10 @@ index 00000000..f8180616
 \ No newline at end of file
 diff --git a/src/aimspy_api/callback.f90 b/src/aimspy_api/callback.f90
 new file mode 100644
-index 00000000..84df2c14
+index 00000000..66a84730
 --- /dev/null
 +++ b/src/aimspy_api/callback.f90
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,278 @@
 +module aimspy_callback
 +
 +    use iso_c_binding
@@ -208,6 +208,10 @@ index 00000000..84df2c14
 +            type(c_funptr), private :: get_descr_callback = c_null_funptr
 +            type(c_ptr), private    :: get_descr_aux_ptr  = c_null_ptr
 +
++            ! export S
++            type(c_funptr), private :: export_ovlp_callback = c_null_funptr
++            type(c_ptr), private    :: export_ovlp_aux_ptr  = c_null_ptr
++
 +            ! export H0
 +            type(c_funptr), private :: export_h0_callback = c_null_funptr
 +            type(c_ptr), private    :: export_h0_aux_ptr  = c_null_ptr
@@ -226,6 +230,9 @@ index 00000000..84df2c14
 +            ! ============== [2]. register methods and calling functins ==================
 +            procedure :: register_get_descr
 +            procedure :: get_descr_func
++
++            procedure :: register_export_ovlp
++            procedure :: export_ovlp_func
 +
 +            procedure :: register_export_h0
 +            procedure :: export_h0_func
@@ -330,6 +337,36 @@ index 00000000..84df2c14
 +                call callback_proc(this%get_descr_aux_ptr, this%descr_ptr)
 +
 +            end subroutine get_descr_func
++
++            subroutine register_export_ovlp(this, callback_funptr, aux_ptr)
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                type(c_funptr), value :: callback_funptr
++                type(c_ptr), value :: aux_ptr
++
++                this%export_ovlp_callback = callback_funptr
++                this%export_ovlp_aux_ptr = aux_ptr
++
++            end subroutine register_export_ovlp
++
++            subroutine export_ovlp_func(this, overlap_matrix)
++                use iso_c_binding
++                use dimensions, only: n_hamiltonian_matrix_size
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                real*8, intent(in), target :: overlap_matrix(:)
++                procedure(aimspy_export_mx_cb_t), pointer :: callback_proc
++
++                if (.not. c_associated(this%export_ovlp_callback)) then
++                    return
++                end if
++
++                call c_f_procpointer(this%export_ovlp_callback, callback_proc)
++                call callback_proc(this%export_ovlp_aux_ptr, &
++                                  c_loc(overlap_matrix(1)), &
++                                  int(n_hamiltonian_matrix_size, c_int), &
++                                  1)
++            end subroutine export_ovlp_func
 +
 +            subroutine register_export_h0(this, callback_funptr, aux_ptr)
 +                implicit none
@@ -846,10 +883,10 @@ index 00000000..3ddc8360
 \ No newline at end of file
 diff --git a/src/aimspy_api/register.f90 b/src/aimspy_api/register.f90
 new file mode 100644
-index 00000000..4615103a
+index 00000000..e28779bb
 --- /dev/null
 +++ b/src/aimspy_api/register.f90
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,62 @@
 +module aimspy_callback_register
 +    use iso_c_binding
 +    use aimspy_api_bank, only : aimspy_callback_hd
@@ -857,6 +894,7 @@ index 00000000..4615103a
 +    private
 +
 +    public :: aimspy_register_get_descr_callback
++    public :: aimspy_register_export_ovlp_callback
 +    public :: aimspy_register_export_h0_callback
 +    public :: aimspy_register_modify_h0_callback
 +    public :: aimspy_register_python_callback
@@ -871,6 +909,16 @@ index 00000000..4615103a
 +
 +        call aimspy_callback_hd%register_get_descr(callback_funptr, aux_ptr)
 +    end subroutine aimspy_register_get_descr_callback
++
++    subroutine aimspy_register_export_ovlp_callback(callback_funptr, aux_ptr) &
++        bind(c, name="aimspy_register_export_ovlp_callback")
++        use aimspy_api_bank, only : aimspy_callback_hd
++        type(c_funptr), value :: callback_funptr
++        type(c_ptr), value :: aux_ptr
++
++        call aimspy_callback_hd%register_export_ovlp(callback_funptr, aux_ptr)
++
++    end subroutine aimspy_register_export_ovlp_callback
 +
 +    subroutine aimspy_register_export_h0_callback(callback_funptr, aux_ptr) &
 +        bind(c, name="aimspy_register_export_h0_callback")
@@ -903,7 +951,7 @@ index 00000000..4615103a
 +end module aimspy_callback_register
 \ No newline at end of file
 diff --git a/src/initialize_scf.f90 b/src/initialize_scf.f90
-index 7a51c788..317ca099 100644
+index 7a51c788..ad172dbe 100644
 --- a/src/initialize_scf.f90
 +++ b/src/initialize_scf.f90
 @@ -81,6 +81,8 @@
@@ -915,14 +963,14 @@ index 7a51c788..317ca099 100644
        implicit none
  
  !  INTERFACES
-@@ -895,6 +897,37 @@
+@@ -895,6 +897,38 @@
           if(info) call reshape_matrices
        end if
  
 +      !block
 +          !use aimspy_api_bank, only : aimspy_initialized, c_overlap, aimspy_callback_hd
 +          
-+          if (aimspy_initialized) then
++          if (.not.use_local_index .and. aimspy_initialized) then
 +            if (myid == 0) then
 +              if (.not. allocated(c_overlap)) then
 +                allocate(c_overlap(n_hamiltonian_matrix_size))
@@ -932,6 +980,7 @@ index 7a51c788..317ca099 100644
 +            end if 
 +
 +              call aimspy_callback_hd%get_descr_func()
++              call aimspy_callback_hd%export_ovlp_func(overlap_matrix)
 +              call aimspy_callback_hd%export_h0_func(hamiltonian)
 +              call aimspy_callback_hd%python_func()  ! can reconstruct hamiltonian
 +              if (aimspy_callback_hd%modify_h0_registed) then
@@ -953,7 +1002,7 @@ index 7a51c788..317ca099 100644
        if (.not.use_local_index .and. out_matrices) then
           if (out_matrices_format_2005) then
              call output_real_matrices ( overlap_matrix, hamiltonian )
-@@ -977,7 +1010,31 @@
+@@ -977,7 +1011,31 @@
  
        if ( .not. (keep_restart_info.and.restart_file_exists) ) then
   

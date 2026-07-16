@@ -1,36 +1,37 @@
-"""Public — pluggable external-matrix-source interface.
+"""Public — external-format interface layer.
 
-To add support for a new external format (DFTB+, Wannier, etc.):
-  1. Subclass ``ExternalMatrixSource``.
-  2. Implement ``to_aimspy(structure) -> AimspyMatrix``.
-  3. Pass the instance to ``Calculator.modify_h0``.
+External format data classes (e.g.
+:class:`aimspy.interface.deeph.DeepHData`) provide a
+``to_aimspy(structure) -> AimspyMatrix`` method for use with
+:meth:`aimspy.Calculator.modify` (via ``source=``).
+
+To add support for a new external format, create a subpackage under
+``aimspy/interface/<format>/`` containing a data class that implements
+the :class:`ExternalMatrixSource` protocol.
 """
+
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-import numpy as np
+if TYPE_CHECKING:
+    from ..matrix import AimspyMatrix
+    from ..structure import AimspyStructure
 
-from ..matrix import AimspyMatrix
-from ..structure import AimspyStructure
 
+@runtime_checkable
+class ExternalMatrixSource(Protocol):
+    """Protocol for external matrix sources accepted by
+    :meth:`aimspy.Calculator.modify`.
 
-class ExternalMatrixSource(ABC):
-    """Abstract base: an external H source convertible to aimspy format.
+    Any object with a ``to_aimspy(structure) -> AimspyMatrix`` method
+    satisfies this protocol (structural typing / duck typing).
 
-    Concrete sources (e.g. ``DeepHSource``) parse external data and
-    provide a ``to_aimspy`` method that the Calculator's ``python_func``
-    callback invokes at runtime.
-
-    The conversion receives the live ``AimspyStructure`` (built from
-    ``aimspy_init``'s ``AimspyInfo``), allowing atom reordering.
+    Implementations:
+      - :class:`aimspy.interface.deeph.DeepHData`
     """
 
-    @abstractmethod
-    def to_aimspy(self, structure: AimspyStructure) -> AimspyMatrix:
-        """Convert this source to aimspy standard format.
+    def to_aimspy(self, structure: "AimspyStructure") -> "AimspyMatrix": ...
 
-        Called from the ``python_func`` callback during ``run()``, after
-        both ``AimspyInfo`` and ``CsrMatrixDescriptor`` are available.
-        """
-        ...
+
+__all__ = ["ExternalMatrixSource"]

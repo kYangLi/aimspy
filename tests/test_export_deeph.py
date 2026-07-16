@@ -17,6 +17,7 @@ Usage:
     cd /home/deeph/software/calc/aimspy/pyapi
     mpirun -np 8 python tests/test_export_deeph.py
 """
+
 from __future__ import annotations
 
 import json
@@ -29,7 +30,7 @@ import numpy as np
 from mpi4py import MPI
 
 from aimspy import Calculator, CalculatorConfig
-from aimspy.interface.deeph import DeepHData, DeepHSource
+from aimspy.interface.deeph import DeepHData
 
 HERE = Path(__file__).resolve().parent
 LIB_PATH = Path(
@@ -62,7 +63,7 @@ def _build_per_pair(ap, cb, cs, ent):
         key = tuple(int(x) for x in ap[i])
         start = int(cb[i])
         nr, nc = int(cs[i, 0]), int(cs[i, 1])
-        result[key] = ent[start:start + nr * nc]
+        result[key] = ent[start : start + nr * nc]
     return result
 
 
@@ -93,8 +94,10 @@ def _compare_pp(name, ref_pp, out_pp, atol=1e-8):
 
     ok = max_diff < atol
     tag = "OK " if ok else "FAIL"
-    _info(f"  {tag}  {name}: {len(common)} pairs, max|diff|={max_diff:.2e}"
-          + ("" if ok else f" (atol={atol:.0e})"))
+    _info(
+        f"  {tag}  {name}: {len(common)} pairs, max|diff|={max_diff:.2e}"
+        + ("" if ok else f" (atol={atol:.0e})")
+    )
     return ok, max_diff, len(common)
 
 
@@ -107,26 +110,24 @@ _info("=" * 60)
 
 config = CalculatorConfig(
     lib_path=LIB_PATH,
-    work_dir=DATA_DIR,
-    logfile=DATA_DIR / "aims_export.out",
+    logfile=Path("aims_export.out"),
     log_level="INFO",
+    capture_initial_hamiltonian=True,
 )
 calc = Calculator(config)
-calc.capture_h0 = True
-calc.init(comm=comm)
 
 try:
-    calc.run()
+    calc.do(comm=comm, work_dir=DATA_DIR)
 
     if rank == 0:
         H_aimspy = calc.hamiltonian
         S_aimspy = calc.overlap
-        H0_aimspy = calc.initial_hamiltonian
+        h_init_aimspy = calc.initial_hamiltonian
         structure = calc.structure
 
-        _info(f"  H:  {H_aimspy.n_pairs} pairs")
-        _info(f"  S:  {S_aimspy.n_pairs} pairs")
-        _info(f"  H0: {H0_aimspy.n_pairs} pairs")
+        _info(f"  H:       {H_aimspy.n_pairs} pairs")
+        _info(f"  S:       {S_aimspy.n_pairs} pairs")
+        _info(f"  H_init:  {h_init_aimspy.n_pairs} pairs")
         _info(f"  structure: {structure.n_atoms} atoms, {structure.n_basis} basis")
         _info(f"  aims atom_symbols: {structure.atom_symbols}")
 
@@ -138,15 +139,24 @@ try:
         _info(f"Step 2: Export to {DEEPH_OUT} (from_aimspy, no template)")
         _info("=" * 60)
 
-        dd = DeepHData.from_aimspy(structure, H=H_aimspy, S=S_aimspy, H0=H0_aimspy)
+        dd = DeepHData.from_aimspy(
+            structure,
+            hamiltonian=H_aimspy,
+            overlap=S_aimspy,
+            initial_hamiltonian=h_init_aimspy,
+        )
         _info(f"  DeepHData: {dd}")
         _info(f"  n_basis: {dd.n_basis}")
-        _info(f"  overlap_entries: {'present' if dd.overlap_entries is not None else 'None'}")
-        _info(f"  initial_hamiltonian_entries: {'present' if dd.initial_hamiltonian_entries is not None else 'None'}")
+        _info(
+            f"  overlap_entries: {'present' if dd.overlap_entries is not None else 'None'}"
+        )
+        _info(
+            f"  initial_hamiltonian_entries: {'present' if dd.initial_hamiltonian_entries is not None else 'None'}"
+        )
 
         DEEPH_OUT.mkdir(parents=True, exist_ok=True)
         dd.save(DEEPH_OUT)
-        _info(f"  Saved.")
+        _info("  Saved.")
 
         # =================================================================
         # Step 3: Load reference and compare
@@ -167,9 +177,11 @@ try:
         _info("-- POSCAR --")
         _info(f"  ref atom_symbols: {dd_ref.atom_symbols}")
         _info(f"  out atom_symbols: {dd.atom_symbols}")
-        all_ok &= _ok("atom_symbols match",
-                      dd_ref.atom_symbols == dd.atom_symbols,
-                      f"{dd_ref.atom_symbols} vs {dd.atom_symbols}")
+        all_ok &= _ok(
+            "atom_symbols match",
+            dd_ref.atom_symbols == dd.atom_symbols,
+            f"{dd_ref.atom_symbols} vs {dd.atom_symbols}",
+        )
 
         lat_diff = np.max(np.abs(dd.lattice - dd_ref.lattice))
         all_ok &= _ok("lattice", lat_diff < 1e-6, f"max|diff|={lat_diff:.2e}")
@@ -187,45 +199,77 @@ try:
         _info(f"  ref: {json.dumps(ref_info)}")
         _info(f"  out: {json.dumps(out_info)}")
 
-        for key in ["atoms_quantity", "orbits_quantity", "occupation",
-                    "orthogonal_basis", "spinful", "fermi_energy_eV"]:
-            all_ok &= _ok(key, ref_info.get(key) == out_info.get(key),
-                           f"ref={ref_info.get(key)!r} out={out_info.get(key)!r}")
+        for key in [
+            "atoms_quantity",
+            "orbits_quantity",
+            "occupation",
+            "orthogonal_basis",
+            "spinful",
+            "fermi_energy_eV",
+        ]:
+            all_ok &= _ok(
+                key,
+                ref_info.get(key) == out_info.get(key),
+                f"ref={ref_info.get(key)!r} out={out_info.get(key)!r}",
+            )
 
         ref_eom = ref_info.get("elements_orbital_map", {})
         out_eom = out_info.get("elements_orbital_map", {})
-        all_ok &= _ok("elements_orbital_map match", ref_eom == out_eom,
-                       f"ref={ref_eom}\nout={out_eom}")
+        all_ok &= _ok(
+            "elements_orbital_map match",
+            ref_eom == out_eom,
+            f"ref={ref_eom}\nout={out_eom}",
+        )
 
         # -- 3c. Matrix structure --
         _info("")
         _info("-- Matrix structure --")
-        all_ok &= _ok("n_pairs", dd_ref.n_pairs == dd.n_pairs,
-                       f"ref={dd_ref.n_pairs} out={dd.n_pairs}")
+        all_ok &= _ok(
+            "n_pairs",
+            dd_ref.n_pairs == dd.n_pairs,
+            f"ref={dd_ref.n_pairs} out={dd.n_pairs}",
+        )
 
-        ref_keys = set(tuple(int(x) for x in dd_ref.atom_pairs[i])
-                       for i in range(dd_ref.n_pairs))
-        out_keys = set(tuple(int(x) for x in dd.atom_pairs[i])
-                       for i in range(dd.n_pairs))
-        all_ok &= _ok("pair key sets match", ref_keys == out_keys,
-                       f"{len(ref_keys)} vs {len(out_keys)}")
+        ref_keys = set(
+            tuple(int(x) for x in dd_ref.atom_pairs[i]) for i in range(dd_ref.n_pairs)
+        )
+        out_keys = set(
+            tuple(int(x) for x in dd.atom_pairs[i]) for i in range(dd.n_pairs)
+        )
+        all_ok &= _ok(
+            "pair key sets match",
+            ref_keys == out_keys,
+            f"{len(ref_keys)} vs {len(out_keys)}",
+        )
 
         # -- 3d. Hamiltonian entries --
         _info("")
         _info("-- Hamiltonian entries (eV) --")
-        ref_H_pp = _build_per_pair(dd_ref.atom_pairs, dd_ref.chunk_boundaries,
-                                    dd_ref.chunk_shapes, dd_ref.entries)
-        out_H_pp = _build_per_pair(dd.atom_pairs, dd.chunk_boundaries,
-                                    dd.chunk_shapes, dd.entries)
+        ref_H_pp = _build_per_pair(
+            dd_ref.atom_pairs,
+            dd_ref.chunk_boundaries,
+            dd_ref.chunk_shapes,
+            dd_ref.entries,
+        )
+        out_H_pp = _build_per_pair(
+            dd.atom_pairs, dd.chunk_boundaries, dd.chunk_shapes, dd.entries
+        )
 
         ok, h_diff, n_cmp = _compare_pp("H entries", ref_H_pp, out_H_pp, atol=1e-4)
         all_ok &= ok
 
         # Statistics
-        all_diffs = np.array([np.max(np.abs(ref_H_pp[k] - out_H_pp[k]))
-                              for k in ref_H_pp if k in out_H_pp])
-        _info(f"  Per-pair: min={np.min(all_diffs):.2e} "
-              f"mean={np.mean(all_diffs):.2e} max={np.max(all_diffs):.2e}")
+        all_diffs = np.array(
+            [
+                np.max(np.abs(ref_H_pp[k] - out_H_pp[k]))
+                for k in ref_H_pp
+                if k in out_H_pp
+            ]
+        )
+        _info(
+            f"  Per-pair: min={np.min(all_diffs):.2e} "
+            f"mean={np.mean(all_diffs):.2e} max={np.max(all_diffs):.2e}"
+        )
         _info(f"  Pairs >1e-4: {np.sum(all_diffs > 1e-4)}/{len(all_diffs)}")
         _info(f"  Pairs >1e-6: {np.sum(all_diffs > 1e-6)}/{len(all_diffs)}")
         _info(f"  Pairs >1e-8: {np.sum(all_diffs > 1e-8)}/{len(all_diffs)}")
@@ -241,55 +285,72 @@ try:
                 ov = out_H_pp[key]
                 d = np.max(np.abs(rv - ov))
                 if np.max(np.abs(rv)) > 0.01:
-                    _info(f"  {key}: ref[0]={rv[0]:.6e} out[0]={ov[0]:.6e} diff={d:.2e}")
+                    _info(
+                        f"  {key}: ref[0]={rv[0]:.6e} out[0]={ov[0]:.6e} diff={d:.2e}"
+                    )
                     shown += 1
 
         # -- 3e. Overlap entries --
         _info("")
         _info("-- Overlap entries (dimensionless) --")
         if dd_ref.overlap_entries is not None and dd.overlap_entries is not None:
-            ref_S_pp = _build_per_pair(dd_ref.atom_pairs, dd_ref.chunk_boundaries,
-                                        dd_ref.chunk_shapes, dd_ref.overlap_entries)
-            out_S_pp = _build_per_pair(dd.atom_pairs, dd.chunk_boundaries,
-                                        dd.chunk_shapes, dd.overlap_entries)
+            ref_S_pp = _build_per_pair(
+                dd_ref.atom_pairs,
+                dd_ref.chunk_boundaries,
+                dd_ref.chunk_shapes,
+                dd_ref.overlap_entries,
+            )
+            out_S_pp = _build_per_pair(
+                dd.atom_pairs, dd.chunk_boundaries, dd.chunk_shapes, dd.overlap_entries
+            )
             ok, s_diff, _ = _compare_pp("S entries", ref_S_pp, out_S_pp, atol=1e-10)
             all_ok &= ok
         else:
-            _info(f"  SKIP: ref={'present' if dd_ref.overlap_entries is not None else 'None'}"
-                  f" out={'present' if dd.overlap_entries is not None else 'None'}")
+            _info(
+                f"  SKIP: ref={'present' if dd_ref.overlap_entries is not None else 'None'}"
+                f" out={'present' if dd.overlap_entries is not None else 'None'}"
+            )
 
         # -- 3f. Cross-validation: DeepH → aimspy → aims CSR --
         _info("")
-        _info("-- Cross-validation: our DeepH → aimspy → aims CSR vs rs_hamiltonian.out --")
+        _info(
+            "-- Cross-validation: our DeepH → aimspy → aims CSR vs rs_hamiltonian.out --"
+        )
         ref_H_txt = np.loadtxt(DATA_DIR / "rs_hamiltonian.out", dtype=np.float64)
         ref_H_txt = ref_H_txt.reshape(1, -1) if ref_H_txt.ndim == 1 else ref_H_txt
 
-        source = DeepHSource(dd)
-        H_back = source.to_aimspy(structure)
+        H_back = dd.to_aimspy(structure)
         csr = calc.csr_descr
         H_csr = H_back.to_aims_csr(csr, structure)
         trim = csr.n_ham_size - 1
         csr_diff = np.max(np.abs(ref_H_txt[0, :trim] - H_csr[0, :trim]))
-        all_ok &= _ok("DeepH→aimspy→aims CSR vs rs_hamiltonian.out",
-                       csr_diff < 1e-10, f"max|diff|={csr_diff:.2e}")
+        all_ok &= _ok(
+            "DeepH→aimspy→aims CSR vs rs_hamiltonian.out",
+            csr_diff < 1e-10,
+            f"max|diff|={csr_diff:.2e}",
+        )
 
-        # -- 3g. H0 verification --
+        # -- 3g. initial Hamiltonian (H_init) verification --
         _info("")
-        _info("-- H0 (initial Hamiltonian) --")
+        _info("-- H_init (initial Hamiltonian) --")
         if dd.initial_hamiltonian_entries is not None:
-            h0_ent = dd.initial_hamiltonian_entries
+            h_init_ent = dd.initial_hamiltonian_entries
             h_ent = dd.entries
-            _info(f"  H0 entries shape: {h0_ent.shape}")
-            _info(f"  H0 max|entries|: {np.max(np.abs(h0_ent)):.4f} eV")
-            _info(f"  H  max|entries|: {np.max(np.abs(h_ent)):.4f} eV")
-            h0_diff = np.max(np.abs(h_ent - h0_ent))
-            _info(f"  H0 vs H max|diff|: {h0_diff:.4f} eV (should be > 0)")
-            all_ok &= _ok("H0 differs from H", h0_diff > 0.1,
-                           f"diff={h0_diff:.4f}")
+            _info(f"  H_init entries shape: {h_init_ent.shape}")
+            _info(f"  H_init max|entries|: {np.max(np.abs(h_init_ent)):.4f} eV")
+            _info(f"  H       max|entries|: {np.max(np.abs(h_ent)):.4f} eV")
+            h_init_diff = np.max(np.abs(h_ent - h_init_ent))
+            _info(f"  H_init vs H max|diff|: {h_init_diff:.4f} eV (should be > 0)")
+            all_ok &= _ok(
+                "H_init differs from H",
+                h_init_diff > 0.1,
+                f"diff={h_init_diff:.4f}",
+            )
 
-            # Cross-validate H0 via DeepH → aimspy → aims CSR
-            dd_h0_only = DeepHData(
-                lattice=dd.lattice, atom_symbols=dd.atom_symbols,
+            # Cross-validate H_init via DeepH → aimspy → aims CSR
+            dd_h_init_only = DeepHData(
+                lattice=dd.lattice,
+                atom_symbols=dd.atom_symbols,
                 atom_coords=dd.atom_coords,
                 elements_orbital_map=dd.elements_orbital_map,
                 n_basis=dd.n_basis,
@@ -298,17 +359,21 @@ try:
                 chunk_shapes=dd.chunk_shapes,
                 entries=dd.initial_hamiltonian_entries,
             )
-            src_h0 = DeepHSource(dd_h0_only)
-            H0_back = src_h0.to_aimspy(structure)
-            H0_csr = H0_back.to_aims_csr(csr, structure)
-            rt_diff = np.max(np.abs(
-                H0_csr[0, :trim]
-                - H0_aimspy.to_aims_csr(csr, structure)[0, :trim]
-            ))
-            all_ok &= _ok("H0 roundtrip (DeepH→aimspy→aims CSR)",
-                           rt_diff < 1e-10, f"max|diff|={rt_diff:.2e}")
+            h_init_back = dd_h_init_only.to_aimspy(structure)
+            h_init_csr = h_init_back.to_aims_csr(csr, structure)
+            rt_diff = np.max(
+                np.abs(
+                    h_init_csr[0, :trim]
+                    - h_init_aimspy.to_aims_csr(csr, structure)[0, :trim]
+                )
+            )
+            all_ok &= _ok(
+                "H_init roundtrip (DeepH→aimspy→aims CSR)",
+                rt_diff < 1e-10,
+                f"max|diff|={rt_diff:.2e}",
+            )
         else:
-            _info("  H0 entries: None")
+            _info("  H_init entries: None")
 
 finally:
     calc.close()

@@ -3,6 +3,7 @@
 This is the only place that directly calls `ctypes.CDLL` on the aims
 shared-library. All higher-level code uses `BindingLib`.
 """
+
 from __future__ import annotations
 
 from ctypes import CDLL, RTLD_GLOBAL
@@ -20,5 +21,6 @@ def load_aims_lib(lib_path: Path | str) -> CDLL:
     this function — it internally does `CDLL(MPI.__file__, mode=RTLD_GLOBAL)`.
     """
     from mpi4py import MPI
+
     CDLL(MPI.__file__, mode=RTLD_GLOBAL)
     return CDLL(str(lib_path), mode=RTLD_GLOBAL)

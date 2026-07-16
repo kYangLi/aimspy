@@ -1,27 +1,25 @@
-"""Private — core callback types: CallbackSpec, CallbackManager, DefaultCallback ABC.
+"""Private — core callback types: CallbackSpec + CallbackManager.
 
-This module is the extensibility hub of aimspy.  Adding a new callback
-to the system requires touching 5 well-defined places (listed in the
-project README):
+Adding a new callback to the system requires touching 4 well-defined
+places:
 
   1.  Fortran side (via patch): type + register + trigger subroutine
   2.  ``_binding/callback_types.py``:  one CFUNCTYPE declaration
   3.  ``_binding/prototypes.py``:  one _PROTOTYPES entry
   4.  ``_callbacks/registry.py``:  one CallbackSpec entry
-  5.  ``_callbacks/defaults.py``:  one DefaultCallback subclass
 
-The ``Calculator`` class does NOT need to be touched — properties are
-auto-generated from the spec list.
+The ``Calculator._wire_callbacks`` method registers its own inline
+closures for each needed callback, bypassing any "default
+implementation" registry. Users may also register custom callables
+via :meth:`aimspy.Calculator.register_callback`.
 """
+
 from __future__ import annotations
 
 import logging
-from abc import ABC, abstractmethod
 from ctypes import CFUNCTYPE, c_void_p, cast, py_object
-from dataclasses import dataclass, field, fields
-from typing import (
-    Any, Callable, ClassVar, Literal, Optional, Tuple, Type, Union,
-)
+from dataclasses import dataclass
+from typing import Any, Callable, Optional, Tuple, Type
 
 import numpy as np
 
@@ -36,7 +34,7 @@ class CallbackSpec:
     """Complete description of one callback type.
 
     Adding a callback = adding one CallbackSpec to ``CALLBACK_SPECS``
-    in ``registry.py`` and ensuring the other 4 places are wired.
+    in ``registry.py`` and ensuring the other 3 places are wired.
 
     Parameters
     ----------
@@ -50,14 +48,11 @@ class CallbackSpec:
     register_arg_count : int
         Number of args the C register function takes *after* the CFUNCTYPE
         wrapper.  2 = (cb, aux); 3 = (cb, aux, extra_c_ptr).
-    default_impl : callable or None
-        Default callback implementation.  If set the ``Calculator`` auto‑generated
-        property will use it.
     property_name : str or None
-        If set, a ``@property`` is auto‑attached to ``Calculator`` with this name.
-        The setter registers the callback via ``register_default``.
+        Reserved for documentation / future auto-property generation.
+        Currently always None — Calculator wires its own inline closures.
     property_doc : str or None
-        Docstring for the auto‑generated property.
+        Docstring for the (future, optional) auto-generated property.
     trigger_stage : str
         Human-readable description of when the callback fires (for docs).
     fortran_module : str
@@ -68,51 +63,11 @@ class CallbackSpec:
     ctypes_type: Type[CFUNCTYPE]
     register_symbol: str
     register_arg_count: int = 2
-    default_impl: Optional[Callable] = None
     property_name: Optional[str] = None
     property_doc: Optional[str] = None
     trigger_stage: str = ""
     fortran_module: str = ""
-    raw_value_key: Optional[str] = None  # if set, auto-setter wraps value as {key: value}
-
-
-# =========================================================================
-# DefaultCallback ABC — base class for default implementations
-# =========================================================================
-class DefaultCallback(ABC):
-    """Base class for default callback implementations.
-
-    Each subclass corresponds to one ``CallbackSpec``.  The subclass
-    implements ``__call__`` with a Python-friendly signature (no ctypes
-    types exposed to subclasses — the auto‑wrapper handles translation).
-    """
-
-    # Override in subclass:
-    spec: ClassVar[CallbackSpec]
-
-    @classmethod
-    def spec_name(cls) -> str:
-        return cls.spec.name
-
-    @abstractmethod
-    def __call__(self, aux: dict, *args: Any) -> None:
-        """Invoke the callback.
-
-        Parameters
-        ----------
-        aux : dict
-            The aux dict passed through from the registration call.
-        *args
-            Python objects.  The first arg is always the *aux* dict after
-            unpacking.  Additional args depend on the specific callback
-            (the framework auto‑converts ctypes pointers to numpy views).
-        """
-        ...
-
-    @classmethod
-    def make_aux(cls, **kwargs: Any) -> dict:
-        """Build a default *aux* dict for this callback type."""
-        return dict(kwargs)
+    raw_value_key: Optional[str] = None
 
 
 # =========================================================================
@@ -151,22 +106,22 @@ class CallbackManager:
     ) -> None:
         """Register *fn* for *spec*.
 
-        *fn* can be any Python callable — it will be auto‑wrapped into
+        *fn* can be any Python callable — it will be auto-wrapped into
         the appropriate CFUNCTYPE.  The original *fn* and *aux* are both
-        kept alive as long as this ``CallbackManager`` exists (and GC‑safe).
+        kept alive as long as this ``CallbackManager`` exists (and GC-safe).
 
         Parameters
         ----------
         spec : CallbackSpec
         fn : callable
-            Python‑side callback function.  The framework auto‑detects
-            whether *fn* is a subclass of ``DefaultCallback`` or a raw
-            Python function and wraps accordingly.
+            Python-side callback function.  The framework auto-detects
+            *spec.name* and converts pointer args to numpy views where
+            applicable.
         aux : any
             Arbitrary Python object passed through to the callback's
             ``aux`` parameter.  Can be ``None``.
         extra_ptr : int or None
-            Extra c‑pointer value for 3‑arg register functions
+            Extra c-pointer value for 3-arg register functions
             (e.g. the ``input_mx_ptr`` of ``modify_h0``).
         """
         ctypes_fn = self._build_ctypes_wrapper(spec, fn, aux)
@@ -188,35 +143,15 @@ class CallbackManager:
             extra = c_void_p(extra_ptr) if extra_ptr is not None else c_void_p(None)
             register_fn(wrapped, aux_ptr, extra)
         else:
-            raise ValueError(f"unsupported register_arg_count={spec.register_arg_count}")
-
-    def register_default(self, spec: CallbackSpec,
-                         aux: Any = None,
-                         extra_ptr: Optional[int] = None) -> None:
-        """Same as ``register`` but uses ``spec.default_impl`` as the fn.
-
-        If ``spec.default_impl`` is a ``DefaultCallback`` subclass,
-        the per‑instance aux is merged with ``DefaultCallback.make_aux()``.
-        """
-        if spec.default_impl is None:
-            from .._exceptions import AimspyCallbackError
-            raise AimspyCallbackError(
-                f"callback {spec.name!r} has no default implementation"
+            raise ValueError(
+                f"unsupported register_arg_count={spec.register_arg_count}"
             )
-        impl = spec.default_impl
-        if isinstance(impl, type) and issubclass(impl, DefaultCallback):
-            # Instantiate the DefaultCallback subclass
-            impl_instance = impl()
-            merged_aux = impl.make_aux(**(aux if isinstance(aux, dict) else {}))
-            self.register(spec, impl_instance, merged_aux, extra_ptr)
-        else:
-            self.register(spec, impl, aux, extra_ptr)
 
     def is_registered(self, spec_name: str) -> bool:
         return spec_name in self._wrapped
 
     # ------------------------------------------------------------------
-    # Internal: auto‑wrap user Python fn → ctypes wrapper
+    # Internal: auto-wrap user Python fn → ctypes wrapper
     # ------------------------------------------------------------------
     def _build_ctypes_wrapper(
         self,
@@ -224,27 +159,40 @@ class CallbackManager:
         fn: Callable,
         aux: Any,
     ) -> Callable:
-        """Return a ctypes‑friendly wrapper that:
+        """Return a ctypes-friendly wrapper that:
         1.  unpacks the ``aux`` c_void_p back to the Python *aux* object
         2.  converts pointer args to numpy ndarray views where applicable
-        3.  calls the original *fn* with Python‑friendly arguments
+        3.  calls the original *fn* with Python-friendly arguments
         """
         mgr = self  # keep the closure binding to the manager for error recording
 
-        if spec.name == 'get_descr':
+        if spec.name == "get_descr":
+
             def wrapper(aux_ptr: int, descr_ptr: int) -> None:
                 _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
                 from ..data import CsrMatrixDescriptor
                 from .._binding.ctypes_types import CsrMxDescrC
                 from ctypes import cast, c_void_p, POINTER
+
                 try:
                     ptr = cast(c_void_p(descr_ptr), POINTER(CsrMxDescrC))
-                    _aux['descr'] = CsrMatrixDescriptor._from_c_struct(ptr.contents)
+                    _aux["descr"] = CsrMatrixDescriptor._from_c_struct(ptr.contents)
                     fn(_aux)
                 except Exception as exc:
                     _record_callback_error(mgr, spec.name, exc)
 
-        elif spec.name == 'export_h0':
+        elif spec.name == "export_ovlp":
+
+            def wrapper(aux_ptr: int, ovlp_ptr: int, n_ham: int, n_spin: int) -> None:
+                _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
+                try:
+                    ovlp = _ptr_to_view(ovlp_ptr, (int(n_spin), int(n_ham)))
+                    fn(_aux, ovlp, int(n_ham), int(n_spin))
+                except Exception as exc:
+                    _record_callback_error(mgr, spec.name, exc)
+
+        elif spec.name == "export_h0":
+
             def wrapper(aux_ptr: int, h0_ptr: int, n_ham: int, n_spin: int) -> None:
                 _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
                 try:
@@ -253,9 +201,11 @@ class CallbackManager:
                 except Exception as exc:
                     _record_callback_error(mgr, spec.name, exc)
 
-        elif spec.name == 'modify_h0':
-            def wrapper(aux_ptr: int, input_mx_ptr: int,
-                        h0_ptr: int, n_ham: int, n_spin: int) -> None:
+        elif spec.name == "modify_h0":
+
+            def wrapper(
+                aux_ptr: int, input_mx_ptr: int, h0_ptr: int, n_ham: int, n_spin: int
+            ) -> None:
                 _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
                 try:
                     h0 = _ptr_to_view(h0_ptr, (int(n_spin), int(n_ham)))
@@ -263,7 +213,8 @@ class CallbackManager:
                 except Exception as exc:
                     _record_callback_error(mgr, spec.name, exc)
 
-        elif spec.name == 'python_func':
+        elif spec.name == "python_func":
+
             def wrapper(aux_ptr: int) -> None:
                 _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
                 try:
@@ -300,12 +251,13 @@ def _unpack_aux(aux_ptr: int, default: Any = None) -> Any:
 
 
 def _ptr_to_view(ptr, shape: Tuple[int, ...]) -> np.ndarray:
-    """Create a read‑write numpy view of a C array at *ptr* with given *shape*.
+    """Create a read-write numpy view of a C array at *ptr* with given *shape*.
 
     *ptr* can be a raw integer address, c_void_p, or ctypes POINTER.
     Returns a mutable VIEW (not a copy).
     """
     from ctypes import cast, c_void_p, POINTER, c_double
+
     n = 1
     for d in shape:
         n *= d
@@ -327,10 +279,12 @@ def _ptr_to_view(ptr, shape: Tuple[int, ...]) -> np.ndarray:
 
 def _record_callback_error(mgr: "CallbackManager", name: str, exc: Exception) -> None:
     """Report a callback failure to stderr, logger, and the manager's error list."""
-    import sys, traceback
+    import sys
+    import traceback
+
     tb_str = traceback.format_exc()
     print(f"[aimspy] {name} callback FAILED: {exc!r}", file=sys.stderr, flush=True)
     traceback.print_exc(file=sys.stderr)
     _log.error("%s callback raised %s\n%s", name, exc, tb_str)
-    if hasattr(mgr, '_errors') and mgr._errors is not None:
+    if hasattr(mgr, "_errors") and mgr._errors is not None:
         mgr._errors.append((name, exc, tb_str))
