@@ -31,7 +31,7 @@ lint:
 	black --check .
 
 build:
-	uv build --wheel -o dist ./
+	uv build --sdist --wheel -o dist ./
 
 patch:
 	aimspy patch "$${AIMS_SOURCE:-./FHIaims250822_1}"

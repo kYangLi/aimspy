@@ -47,6 +47,7 @@ Homepage = "https://github.com/kYangLi/aimspy"
 Documentation = "https://github.com/kYangLi/aimspy#readme"
 Repository = "https://github.com/kYangLi/aimspy.git"
 Issues = "https://github.com/kYangLi/aimspy/issues"
+Changelog = "https://github.com/kYangLi/aimspy/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]

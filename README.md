@@ -17,7 +17,7 @@ directly from Python — no subprocess, no file-staged I/O on hot paths — by
 loading a patched `libaims.so` via `ctypes` and exchanging matrices in memory
 through a callback framework.
 
-> **Status:** `v0.1.0` (alpha) — Calculator lifecycle, ctypes binding,
+> **Status:** `v0.2.0` (alpha) — Calculator lifecycle, ctypes binding,
 > callback framework, aimspy standard format, DeepH interface layer, unified
 > `modify_init_ham()` API (direct + deferred), forces export, and overlap
 > capture are implemented and tested.
