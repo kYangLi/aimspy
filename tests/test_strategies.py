@@ -10,11 +10,11 @@ runs in a SEPARATE MPI invocation via subprocess. The controlling
 Python process dispatches them and aggregates results.
 
 Usage:
-    source /home/deeph/software/env/IntelOneAPI/install/setvars.sh
+    source /path/to/intel/setvars.sh
     ulimit -s unlimited
-    cd /home/deeph/software/calc/aimspy/pyapi
+    export AIMSPY_TEST_AIMS_LIBPATH=/path/to/libaims.so
     python tests/test_strategies.py            # dispatches 4 sub-MPI jobs
-    mpirun -np 8 python tests/test_strategies.py --strategy baseline  # single
+    mpiexec -np 8 python tests/test_strategies.py --strategy baseline  # single
 """
 
 from __future__ import annotations
@@ -28,8 +28,18 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE / "data" / "MoS2"
-LIB_PATH = "/home/deeph/software/calc/aimspy/FHI-aims-deeph/build/libaims.250822_1.scalapack.mpi.so"
 NPROC = os.environ.get("AIMSPY_TEST_NPROC", "8")
+
+_lib_env = os.environ.get("AIMSPY_TEST_AIMS_LIBPATH")
+if not _lib_env:
+    print(
+        "ERROR: AIMSPY_TEST_AIMS_LIBPATH environment variable not set.\n"
+        "  Export the path to your patched libaims.so before running:\n"
+        "    export AIMSPY_TEST_AIMS_LIBPATH=/path/to/libaims.so",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+LIB_PATH = _lib_env
 
 ref_H = np.loadtxt(DATA_DIR / "rs_hamiltonian.out", dtype=np.float64)
 ref_H = ref_H.reshape(1, -1) if ref_H.ndim == 1 else ref_H
@@ -41,9 +51,8 @@ def run_single(strategy: str) -> dict:
     Returns dict with H (rs_hamiltonian), energy, ok.
     """
     env = os.environ.copy()
-    env["AIMSPY_STRATEGY"] = strategy
-    env["AIMSPY_LIB"] = LIB_PATH
-    cmd = ["mpirun", "-np", NPROC, sys.executable, __file__, "--child", strategy]
+    env["AIMSPY_TEST_STRATEGY"] = strategy
+    cmd = ["mpiexec", "-np", NPROC, sys.executable, __file__, "--child", strategy]
 
     print(f"  dispatching: {' '.join(cmd[:4])} ... {strategy}")
     r = subprocess.run(
@@ -97,9 +106,9 @@ def run_children():
         pass  # no modify
     elif strategy == "add":
         dd = DeepHData.from_directory(deeph_dir)
-        calc.modify(source=dd, strategy=Strategy.ADD)
+        calc.modify_init_ham(source=dd, strategy=Strategy.ADD)
     elif strategy == "scale":
-        calc.modify(strategy=Strategy.SCALE, factor=0.5)
+        calc.modify_init_ham(strategy=Strategy.SCALE, factor=0.5)
     elif strategy == "custom":
 
         def custom_diag(live, external, structure, aux):
@@ -109,7 +118,7 @@ def run_children():
                 if i_atom != j_atom or (R1, R2, R3) != (0, 0, 0):
                     live.blocks[key] = np.zeros_like(live.blocks[key])
 
-        calc.modify(strategy=Strategy.CUSTOM, custom_fn=custom_diag)
+        calc.modify_init_ham(strategy=Strategy.CUSTOM, custom_fn=custom_diag)
     else:
         print(f"Unknown strategy: {strategy}", file=sys.stderr)
         sys.exit(2)

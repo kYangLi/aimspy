@@ -12,7 +12,7 @@ Primary entry points:
   - :class:`ExternalMatrixSource` — Protocol for external matrix sources
 
   H0 modification (warmstart, scale, custom) is configured via
-  :meth:`Calculator.modify` (direct or deferred source), called before
+  :meth:`Calculator.modify_init_ham` (direct or deferred source), called before
   :meth:`Calculator.do`.
   ``CalculatorConfig.capture_initial_hamiltonian=True`` opts in to
   capturing the free-atom initial Hamiltonian (exposed via

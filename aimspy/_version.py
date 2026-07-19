@@ -7,4 +7,4 @@ try:
 
     __version__ = _get_version(_pkg_name)
 except Exception:
-    __version__ = "0.1.0"
+    __version__ = "0.2.0"

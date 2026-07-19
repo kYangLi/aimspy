@@ -3,7 +3,7 @@
 External format data classes (e.g.
 :class:`aimspy.interface.deeph.DeepHData`) provide a
 ``to_aimspy(structure) -> AimspyMatrix`` method for use with
-:meth:`aimspy.Calculator.modify` (via ``source=``).
+:meth:`aimspy.Calculator.modify_init_ham` (via ``source=``).
 
 To add support for a new external format, create a subpackage under
 ``aimspy/interface/<format>/`` containing a data class that implements
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 @runtime_checkable
 class ExternalMatrixSource(Protocol):
     """Protocol for external matrix sources accepted by
-    :meth:`aimspy.Calculator.modify`.
+    :meth:`aimspy.Calculator.modify_init_ham`.
 
     Any object with a ``to_aimspy(structure) -> AimspyMatrix`` method
     satisfies this protocol (structural typing / duck typing).

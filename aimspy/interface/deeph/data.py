@@ -702,7 +702,7 @@ class DeepHData:
         - Units: eV → Hartree
 
         The result is suitable for passing to
-        :meth:`aimspy.Calculator.modify` via ``source=``.
+        :meth:`aimspy.Calculator.modify_init_ham` via ``source=``.
 
         Parameters
         ----------

@@ -27,7 +27,7 @@ Warmstart with DeepH data (direct source)::
     data = DeepHData.from_directory("deeph_warm/")
     config = CalculatorConfig(lib_path="/path/to/libaims.so")
     calc = Calculator(config)
-    calc.modify(source=data, strategy=Strategy.REPLACE)
+    calc.modify_init_ham(source=data, strategy=Strategy.REPLACE)
     calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
 
 Warmstart with DeepH data (deferred source — source generated at runtime
@@ -38,10 +38,10 @@ during ``python_func`` callback, after H0/overlap are available)::
     )
     calc = Calculator(config)
 
-    @calc.modify(strategy=Strategy.REPLACE, aux={"deeph_path": "deeph_warm/"})
-    def gen_source(calculator, aux):
+    @calc.modify_init_ham(strategy=Strategy.REPLACE, option={"deeph_path": "deeph_warm/"})
+    def gen_source(calculator, option):
         # calculator.initial_hamiltonian / .overlap are available here
-        return DeepHData.from_directory(aux["deeph_path"])
+        return DeepHData.from_directory(option["deeph_path"])
 
     calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
 
@@ -100,7 +100,7 @@ logging.basicConfig(level=logging.WARNING)
 class Strategy(Enum):
     """Initial Hamiltonian modification strategy names.
 
-    Used by :meth:`Calculator.modify`.
+    Used by :meth:`Calculator.modify_init_ham`.
     """
 
     REPLACE = "replace"
@@ -186,7 +186,7 @@ class Calculator:
     - :meth:`close` — finalize (also called by ``__exit__``).
       Use :meth:`force_close` after SCF failure.
 
-    H0 modification is configured via :meth:`modify` (direct or deferred
+    H0 modification is configured via :meth:`modify_init_ham` (direct or deferred
     source), which must be called before :meth:`do` / :meth:`init`.
 
     .. note::
@@ -606,14 +606,14 @@ class Calculator:
     # ==================================================================
     # H0 modification (unified API: direct + deferred)
     # ==================================================================
-    def modify(
+    def modify_init_ham(
         self,
         source: Optional["ExternalMatrixSource"] = None,
         *,
         strategy: Union[Strategy, str] = Strategy.REPLACE,
         factor: float = 1.0,
         custom_fn: Optional[Callable] = None,
-        aux: Optional[dict] = None,
+        option: Optional[dict] = None,
     ) -> Optional[Callable]:
         """Configure H0 modification — unified API for both direct and
         deferred source.
@@ -622,21 +622,21 @@ class Calculator:
 
         **Direct mode** (pre-built source or source-less strategy)::
 
-            calc.modify(source=data, strategy=Strategy.REPLACE)
-            calc.modify(source=data, strategy=Strategy.ADD)
-            calc.modify(strategy=Strategy.SCALE, factor=0.9)
-            calc.modify(strategy=Strategy.CUSTOM, custom_fn=my_fn, source=data)
+            calc.modify_init_ham(source=data, strategy=Strategy.REPLACE)
+            calc.modify_init_ham(source=data, strategy=Strategy.ADD)
+            calc.modify_init_ham(strategy=Strategy.SCALE, factor=0.9)
+            calc.modify_init_ham(strategy=Strategy.CUSTOM, custom_fn=my_fn, source=data)
 
         **Deferred mode** (source generated at runtime via decorator;
         only for REPLACE / ADD strategies without a pre-built source)::
 
-            @calc.modify(strategy=Strategy.REPLACE, aux={"deeph_path": "..."})
-            def gen_source(calculator, aux):
+            @calc.modify_init_ham(strategy=Strategy.REPLACE, option={"deeph_path": "..."})
+            def gen_source(calculator, option):
                 # calculator.initial_hamiltonian / .overlap are available
                 # here if capture_* was enabled in CalculatorConfig.
-                return DeepHData.from_directory(aux["deeph_path"])
+                return DeepHData.from_directory(option["deeph_path"])
 
-        In deferred mode, the decorated function ``fn(calculator, aux)``
+        In deferred mode, the decorated function ``fn(calculator, option)``
         is called during the ``python_func`` callback (between
         ``export_h0`` and ``modify_h0`` in ``initialize_scf.f90``),
         with access to the live :class:`Calculator` object. The returned
@@ -654,7 +654,7 @@ class Calculator:
             Scale factor for SCALE strategy.
         custom_fn : callable or None
             ``fn(live, external, structure, aux) -> None`` for CUSTOM.
-        aux : dict or None
+        option : dict or None
             User-specified data passed to the deferred source function
             as second argument.
 
@@ -676,12 +676,14 @@ class Calculator:
                 strategy = Strategy(strategy.lower())
             except ValueError:
                 raise AimspyConfigError(
-                    f"modify: invalid strategy {strategy!r}; "
+                    f"modify_init_ham: invalid strategy {strategy!r}; "
                     f"valid: {[s.value for s in Strategy]}"
                 )
 
         if strategy == Strategy.CUSTOM and custom_fn is None:
-            raise AimspyConfigError("modify: CUSTOM strategy requires 'custom_fn'")
+            raise AimspyConfigError(
+                "modify_init_ham: CUSTOM strategy requires 'custom_fn'"
+            )
 
         # Determine mode: direct if source is given, strategy doesn't
         # need source (SCALE), or custom_fn is given (CUSTOM).
@@ -701,17 +703,17 @@ class Calculator:
 
         # ── Deferred mode: return a decorator ──
         def decorator(fn: Callable) -> Callable:
-            user_aux = aux if aux is not None else {}
+            user_option = option if option is not None else {}
             calc = self  # capture for closure
 
             def to_aimspy(structure: AimspyStructure) -> AimspyMatrix:
                 # Called from _on_python_func during python_func callback.
                 # At this point calc.initial_hamiltonian / .overlap etc.
                 # are available (if capture_* was enabled).
-                src = fn(calc, user_aux)
+                src = fn(calc, user_option)
                 if src is None:
                     raise AimspyConfigError(
-                        "deferred modify source function returned None; "
+                        "deferred modify_init_ham source function returned None; "
                         "it must return an object with a "
                         "to_aimspy(structure) method"
                     )

@@ -29,7 +29,7 @@ class TestStrategy:
         # Need a source for direct REPLACE mode
         dd = DeepHData.__new__(DeepHData)
         calc = Calculator(CalculatorConfig(lib_path="/tmp/x.so"))
-        calc.modify(source=dd, strategy="REPLACE")
+        calc.modify_init_ham(source=dd, strategy="REPLACE")
         assert calc._modify.strategy == Strategy.REPLACE
 
     def test_strategy_invalid_string_raises_config_error(self):
@@ -37,14 +37,14 @@ class TestStrategy:
 
         calc = Calculator(CalculatorConfig(lib_path="/tmp/x.so"))
         with pytest.raises(AimspyConfigError, match="invalid strategy"):
-            calc.modify(strategy="bogus")
+            calc.modify_init_ham(strategy="bogus")
 
     def test_strategy_custom_without_fn_raises(self):
         from aimspy import Calculator, CalculatorConfig
 
         calc = Calculator(CalculatorConfig(lib_path="/tmp/x.so"))
         with pytest.raises(AimspyConfigError, match="CUSTOM.*custom_fn"):
-            calc.modify(strategy=Strategy.CUSTOM)
+            calc.modify_init_ham(strategy=Strategy.CUSTOM)
 
 
 class TestCallbackName:

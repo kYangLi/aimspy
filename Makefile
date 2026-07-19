@@ -24,17 +24,17 @@ install:
 	uv pip install -e ".[dev]"
 
 test:
-	.venv/bin/python -m pytest tests -q
+	python -m pytest tests -q
 
 lint:
-	.venv/bin/ruff check .
-	.venv/bin/black --check .
+	ruff check .
+	black --check .
 
 build:
 	uv build --wheel -o dist ./
 
 patch:
-	.venv/bin/aimspy patch "$${AIMS_SOURCE:-./FHIaims250822_1}"
+	aimspy patch "$${AIMS_SOURCE:-./FHIaims250822_1}"
 
 clean:
 	@echo "Cleaning build artifacts and cache files..."

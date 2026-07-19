@@ -1,7 +1,5 @@
 /design/
-/examples/**/deeph_data
-*.out
-*.h5
+# TODO update the tests and example ignore rule
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -12,23 +12,58 @@
 
 </div>
 
-**AimSpy** enables driving [FHI-aims](https://aims-code.rg.mpg.de/)
-calculations directly from Python — no subprocess, no file-staged I/O
-for hot paths — by linking a small ctypes extension against the
-FHI-aims Fortran library.
+**AimSpy** drives [FHI-aims](https://aims-code.rg.mpg.de/) DFT calculations
+directly from Python — no subprocess, no file-staged I/O on hot paths — by
+loading a patched `libaims.so` via `ctypes` and exchanging matrices in memory
+through a callback framework.
 
-> **Status:** `v0.1.0` — Calculator, ctypes binding, callback framework,
-> aimspy standard format, DeepH interface layer, unified `modify()` API
-> (direct + deferred), forces export, and overlap capture are implemented
-> and tested. The package is alpha-stage but functional.
+> **Status:** `v0.1.0` (alpha) — Calculator lifecycle, ctypes binding,
+> callback framework, aimspy standard format, DeepH interface layer, unified
+> `modify_init_ham()` API (direct + deferred), forces export, and overlap
+> capture are implemented and tested.
+
+- [Features](#features)
+- [Installation](#installation)
+  - [From PyPI](#from-pypi)
+  - [From source (editable, with dev deps)](#from-source-editable-with-dev-deps)
+  - [Patching FHI-aims](#patching-fhi-aims)
+- [Quick start](#quick-start)
+- [Usage](#usage)
+  - [DeepH warmstart (1-iteration SCF)](#deeph-warmstart-1-iteration-scf)
+  - [Export to DeepH format](#export-to-deeph-format)
+  - [Error recovery](#error-recovery)
+- [API overview](#api-overview)
+  - [`Calculator` — main class](#calculator--main-class)
+  - [`CalculatorConfig`](#calculatorconfig)
+  - [Other public symbols](#other-public-symbols)
+- [Development](#development)
+  - [Environment variables](#environment-variables)
+- [License](#license)
+
+
+## Features
+
+- **In-memory SCF** — load `libaims.so` once, drive SCF from Python via `ctypes`
+- **MPI-transparent** — works under `mpiexec`; rank-0 vs. all-rank APIs documented
+- **Warmstart** — inject an external Hamiltonian (e.g. DeepH prediction) to
+  converge SCF in 1 iteration
+- **Pluggable matrix sources** — `ExternalMatrixSource` protocol; `DeepHData`
+  ships built-in
+- **DeepH I/O** — read/write DeepH format (`POSCAR` + `info.json` + `.h5`)
+- **Callback framework** — 5 hook points (`get_descr`, `export_ovlp`,
+  `export_h0`, `modify_h0`, `python_func`) auto-wrapped to Python
+- **Bundled FHI-aims patch** — `aimspy patch` CLI applies/reverses versioned
+  diffs; no manual editing of the aims source tree
 
 ## Installation
+
+### From PyPI
 
 ```bash
 pip install aimspy
 ```
 
-Or install from source in editable mode with development dependencies:
+### From source (editable, with dev deps)
 
 ```bash
 git clone https://github.com/kYangLi/aimspy.git
@@ -36,70 +71,33 @@ cd aimspy
 pip install -e ".[dev]"
 ```
 
-## Patching FHI-aims
+Requires Python 3.12–3.14, `numpy>=1.24`, `h5py>=3.0`, `mpi4py>=3.0`, `click>=8.0`.
 
-aimspy ships a bundled patch that adapts an FHI-aims source tree so it can
-expose the in-memory interface aimspy needs.  The patch is applied with the
-`aimspy patch` command.
+### Patching FHI-aims
 
-### Prerequisites
-
-- A clean checkout of the FHI-aims source code matching the patch's base
-  branch (currently `dev`).  The tree **must be at the unpatched state**;
-  applying on top of an unrelated branch may fail or produce conflicts.
-
-### Apply the patch
-
-From inside the FHI-aims source directory:
+aimspy ships a bundled patch that adapts an FHI-aims source tree to expose
+the in-memory interface. Apply it with the `aimspy patch` command:
 
 ```bash
 cd /path/to/FHI-aims        # clean checkout, e.g. on branch `dev`
-aimspy patch
+aimspy patch                 # applies the latest bundled diff
 ```
 
-Or point at it from anywhere:
+Common variants:
 
 ```bash
-aimspy patch /path/to/FHI-aims
+aimspy patch -v v0.1.0 /path/to/FHI-aims   # specific version
+aimspy patch --check /path/to/FHI-aims     # dry-run
+aimspy patch --uninstall /path/to/FHI-aims # reverse the detected patch
+aimspy patch --list                        # show bundled versions
 ```
 
-A specific bundled version can be requested:
+**Prerequisites:** a clean FHI-aims checkout on the patch's base branch
+(currently `dev`). The tree must be unpatched; applying on top of an
+unrelated branch may fail. By default `git apply` is used on git repos,
+falling back to `patch -p1` otherwise (`--no-git` forces `patch(1)`).
 
-```bash
-aimspy patch -v v0.1.0 /path/to/FHI-aims
-```
-
-- If no patch is detected, the latest bundled version is applied directly.
-- If a patch is already detected (the source tree's root `Makefile` records
-  `PATCH_VERSION`), you are asked whether to uninstall it first and then
-  apply the new one.  Pass `-y` to skip the confirmation.
-
-### Uninstall the patch
-
-```bash
-aimspy patch --uninstall /path/to/FHI-aims
-```
-
-This reverses the **currently detected** version using its matching bundled
-diff, restoring the source tree to its unpatched state.
-
-### Dry-run / list
-
-```bash
-aimspy patch --check /path/to/FHI-aims   # validate without modifying files
-aimspy patch --list                       # show bundled patch versions
-```
-
-### Non-git source trees
-
-By default `git apply` is used when the target is a git repository, falling
-back to `patch -p1` otherwise.  `--no-git` forces `patch(1)`:
-
-```bash
-aimspy patch --no-git /path/to/FHI-aims
-```
-
-### Reference
+Full CLI reference:
 
 ```
 aimspy patch [SOURCE] [OPTIONS]
@@ -116,103 +114,9 @@ Options:
   -y, --yes              Skip confirmation prompts
 ```
 
-## API Reference
+## Quick start
 
-### `Calculator` — main class
-
-| Method / Property | Description |
-|-------------------|-------------|
-| `do(comm, work_dir)` | One-shot: `init()` + `calc()`. Common entry point. |
-| `init(comm, work_dir)` | Load libaims, call `aimspy_init`, wire callbacks. |
-| `calc()` | Run SCF. Raises `AimspyCallbackError` on callback failure. |
-| `close()` | Finalize. No-op in UNINIT/FINALIZED; raises in RUNNING. |
-| `force_close()` | Force-finalize from any state (swallows Fortran errors). |
-| `modify(source, *, strategy, factor, custom_fn, aux)` | Configure H0 modification (direct or deferred via decorator). |
-| `register_callback(name, fn, aux, extra_ptr)` | Register custom callback (`name`: `CallbackName` or `str`). |
-| `callback_registered(name)` | Check if a callback is registered. |
-| `info` | `AimspyInfo` — runtime snapshot (all ranks). |
-| `structure` | `AimspyStructure` — structure + orbital info (all ranks). |
-| `energy` | `float` — SCF total energy in Hartree (all ranks). |
-| `forces` | `Optional[np.ndarray]` `(n_atoms, 3)` — eV/Å (all ranks). |
-| `hamiltonian` | `AimspyMatrix` — converged H (rank 0). |
-| `overlap` | `AimspyMatrix` — live (if `capture_overlap`) or fallback (rank 0). |
-| `initial_hamiltonian` | `Optional[AimspyMatrix]` — free-atom H_init (if `capture_initial_hamiltonian`). |
-| `csr_descr` | `Optional[CsrMatrixDescriptor]` — CSR layout. |
-| `rs_hamiltonian` | `np.ndarray` — raw CSR flat (rank 0). |
-| `rs_overlap` | `np.ndarray` — raw overlap flat (rank 0). |
-| `work_dir`, `comm` | Execution context. |
-
-### `CalculatorConfig` — configuration dataclass
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `lib_path` | `Path` | required | Path to patched `libaims.so`. |
-| `control_path` | `Path` | `None` | Optional `control.in` to copy into `work_dir`. |
-| `geometry_path` | `Path` | `None` | Optional `geometry.in` to copy into `work_dir`. |
-| `initializer` | `callable` | `None` | `fn(Calculator) -> None` on rank 0 before `aimspy_init`. |
-| `log_level` | `str` | `"INFO"` | Python logging level. |
-| `logfile` | `Path` | `aims.out` | aims log file name. |
-| `capture_initial_hamiltonian` | `bool` | `False` | Enable `export_h0` callback. |
-| `capture_overlap` | `bool` | `False` | Enable `export_ovlp` callback (all-rank live overlap). |
-
-### `Strategy` — H0 modification enum
-
-| Value | Description |
-|-------|-------------|
-| `REPLACE` | Replace live H_init with external source. |
-| `ADD` | Add external source to live H_init. |
-| `SCALE` | Scale live H_init by `factor`. |
-| `CUSTOM` | Custom function `fn(live, external, structure, aux)`. |
-
-### `CallbackName` — callback type enum
-
-`GET_DESCR`, `EXPORT_OVLP`, `EXPORT_H0`, `MODIFY_H0`, `PYTHON_FUNC`.
-
-### `AimspyMatrix` — block-sparse matrix
-
-| Member | Description |
-|--------|-------------|
-| `blocks` | `dict[(R1,R2,R3,i_atom,j_atom), np.ndarray]` — Hartree, aims order. |
-| `n_spin` | `int` |
-| `n_pairs` | `int` — number of blocks. |
-| `from_aims_csr(h0, csr_descr, structure)` | Convert aims CSR flat → aimspy blocks. |
-| `to_aims_csr(csr_descr, structure)` | Convert aimspy blocks → aims CSR flat. |
-
-### `AimspyStructure` — structure + orbital descriptor
-
-| Member | Description |
-|--------|-------------|
-| `n_atoms`, `n_basis`, `n_spin`, `n_periodic` | Scalar dimensions. |
-| `lattice`, `atom_symbols`, `atom_coords` | Structure data. |
-| `basis_atom`, `basis_l`, `basis_m` | Per-basis-function orbital info. |
-| `phase_factor` | Wiki/DeepH parity (cached). |
-| `basis_subidx` | Per-atom orbital sub-index (cached). |
-| `orbit_per_atom` | Basis function count per atom (cached). |
-| `atom_permutation` | `(old2new, new2old)` aims↔POSCAR mapping (cached). |
-
-### `ExternalMatrixSource` — Protocol
-
-Any object with `to_aimspy(structure) -> AimspyMatrix` satisfies this protocol.
-`DeepHData` is the built-in implementation.
-
-### `DeepHData` — DeepH format reader/writer
-
-| Method | Description |
-|--------|-------------|
-| `from_directory(path)` | Read POSCAR + info.json + `.h5` files. |
-| `from_memory(...)` | Build from in-memory block dicts. |
-| `from_aimspy(structure, hamiltonian, overlap, initial_hamiltonian, template)` | Convert from aimspy format. |
-| `to_aimspy(structure)` | Convert to aimspy `AimspyMatrix` (satisfies `ExternalMatrixSource`). |
-| `set_hamiltonian(matrix, structure)` | Set H from `AimspyMatrix`. |
-| `set_overlap(matrix, structure)` | Set S from `AimspyMatrix`. |
-| `set_initial_hamiltonian(matrix, structure)` | Set H_init from `AimspyMatrix`. |
-| `save(path)` | Write all non-None content. |
-| `save_metadata(path)` | Write POSCAR + info.json only. |
-| `save_hamiltonian(path)` / `save_overlap(path)` / `save_initial_hamiltonian(path)` | Write individual `.h5` files. |
-
-## Usage
-
-### Baseline SCF
+Baseline SCF on a prepared `work_dir` (containing `control.in` + `geometry.in`):
 
 ```python
 from mpi4py import MPI
@@ -221,13 +125,21 @@ from aimspy import Calculator, CalculatorConfig
 config = CalculatorConfig(lib_path="/path/to/libaims.so")
 with Calculator(config) as calc:
     calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
-    H = calc.hamiltonian     # AimspyMatrix (available by default)
+    H = calc.hamiltonian     # AimspyMatrix (block-sparse, Hartree)
     E = calc.energy          # float (Hartree)
 ```
 
-### DeepH warmstart
+Run with MPI:
 
-**Direct source** — pre-built `DeepHData`:
+```bash
+mpiexec -np 8 python script.py
+```
+
+## Usage
+
+### DeepH warmstart (1-iteration SCF)
+
+Inject a pre-trained DeepH Hamiltonian as the initial guess:
 
 ```python
 from mpi4py import MPI
@@ -237,32 +149,30 @@ from aimspy.interface.deeph import DeepHData
 data = DeepHData.from_directory("deeph_warm/")
 config = CalculatorConfig(lib_path="/path/to/libaims.so")
 calc = Calculator(config)
-calc.modify(source=data, strategy=Strategy.REPLACE)
+calc.modify_init_ham(source=data, strategy=Strategy.REPLACE)
 calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
-# SCF converges in 1 iteration
 ```
 
-**Deferred source** — source generated at runtime during the
-`python_func` callback (after H0/overlap are available):
+**Deferred source** — generate the source at runtime (after H0/overlap are
+available, inside the `python_func` callback):
 
 ```python
 config = CalculatorConfig(
     lib_path="/path/to/libaims.so",
-    capture_initial_hamiltonian=True,  # enables calc.initial_hamiltonian
+    capture_initial_hamiltonian=True,
 )
 calc = Calculator(config)
 
-@calc.modify(strategy=Strategy.REPLACE, aux={"deeph_path": "deeph_warm/"})
-def gen_source(calculator, aux):
+@calc.modify_init_ham(strategy=Strategy.REPLACE, option={"deeph_path": "deeph_warm/"})
+def gen_source(calculator, option):
     # calculator.initial_hamiltonian / .overlap available here
-    return DeepHData.from_directory(aux["deeph_path"])
+    return DeepHData.from_directory(option["deeph_path"])
 
 calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
 ```
 
-Other strategies: `Strategy.ADD` (add external source to live H0),
-`Strategy.SCALE` (scale live H0 by `factor=`), `Strategy.CUSTOM`
-(custom function via `custom_fn=`).
+Other `Strategy` values: `ADD` (add external H to live H0), `SCALE` (scale
+H0 by `factor=`), `CUSTOM` (user function via `custom_fn=`).
 
 ### Export to DeepH format
 
@@ -273,63 +183,76 @@ from aimspy.interface.deeph import DeepHData
 
 config = CalculatorConfig(
     lib_path="/path/to/libaims.so",
-    capture_initial_hamiltonian=True,   # opt in to free-atom H_init capture
+    capture_initial_hamiltonian=True,
 )
 with Calculator(config) as calc:
     calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
-    hamiltonian = calc.hamiltonian
-    overlap = calc.overlap
-    initial_hamiltonian = calc.initial_hamiltonian  # available because
-                                                    # capture_initial_hamiltonian=True
 
     dd = DeepHData.from_aimspy(
         calc.structure,
-        hamiltonian=hamiltonian,
-        overlap=overlap,
-        initial_hamiltonian=initial_hamiltonian,
+        hamiltonian=calc.hamiltonian,
+        overlap=calc.overlap,
+        initial_hamiltonian=calc.initial_hamiltonian,
     )
     dd.save("deeph_out/")
 ```
 
-### Advanced usage
+### Error recovery
 
-**Error recovery** — if SCF crashes, use `force_close()` then create a new
-Calculator:
+If SCF crashes, use `force_close()` (always safe, swallows Fortran errors)
+and create a fresh `Calculator`:
 
 ```python
 calc = Calculator(CalculatorConfig(lib_path="..."))
 try:
     calc.do(comm=MPI.COMM_WORLD, work_dir="./bad_input")
 except Exception:
-    calc.force_close()  # always works, swallows Fortran errors
+    calc.force_close()
     # create a new Calculator for the next run
 ```
 
-**Custom strategy** — modify H0 with a user function:
+## API overview
 
-```python
-import numpy as np
+### `Calculator` — main class
 
-def zero_offsite(live, external, structure, aux):
-    """Zero out all non-self-pair blocks."""
-    for key in list(live.blocks.keys()):
-        R1, R2, R3, i, j = key
-        if (R1, R2, R3) != (0, 0, 0) or i != j:
-            live.blocks[key] = np.zeros_like(live.blocks[key])
+| Method / Property | Description |
+|-------------------|-------------|
+| `do(comm, work_dir)` | One-shot: `init()` + `calc()`. Common entry point. |
+| `init(comm, work_dir)` | Load libaims, call `aimspy_init`, wire callbacks. |
+| `calc()` | Run SCF. Raises `AimspyCallbackError` on callback failure. |
+| `close()` / `force_close()` | Finalize (graceful / forced from any state). |
+| `modify_init_ham(source, *, strategy, factor, custom_fn, option)` | Configure H0 modification (direct or deferred). |
+| `register_callback(name, fn, aux, extra_ptr)` | Register custom callback. |
+| `info`, `structure` | Runtime snapshot (all ranks). |
+| `energy`, `forces` | SCF results (all ranks; Hartree / eV·Å⁻¹). |
+| `hamiltonian`, `overlap`, `initial_hamiltonian` | `AimspyMatrix` (rank 0; opt-in flags). |
+| `rs_hamiltonian`, `rs_overlap` | Raw CSR flat arrays (rank 0). |
+| `csr_descr`, `work_dir`, `comm` | Layout + execution context. |
 
-calc.modify(strategy=Strategy.CUSTOM, custom_fn=zero_offsite)
-```
+### `CalculatorConfig`
 
-**Register callback** (enum or string, before or after init):
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `lib_path` | `Path` | required | Path to patched `libaims.so`. |
+| `control_path`, `geometry_path` | `Path` | `None` | Optional inputs to copy into `work_dir`. |
+| `initializer` | `callable` | `None` | `fn(Calculator) -> None` on rank 0 before `aimspy_init`. |
+| `log_level` | `str` | `"INFO"` | Python logging level. |
+| `logfile` | `Path` | `aims.out` | aims log file name. |
+| `capture_initial_hamiltonian` | `bool` | `False` | Enable `export_h0` callback. |
+| `capture_overlap` | `bool` | `False` | Enable `export_ovlp` callback (all-rank live overlap). |
 
-```python
-from aimspy import CallbackName
+### Other public symbols
 
-calc.register_callback(CallbackName.EXPORT_H0, my_export_fn, aux={})
-# or: calc.register_callback("export_h0", my_export_fn, aux={})
-```
-
-**Logging**: INFO/WARNING on rank 0 only; ERROR on all ranks.
+- `Strategy` — enum: `REPLACE`, `ADD`, `SCALE`, `CUSTOM`.
+- `CallbackName` — enum: `GET_DESCR`, `EXPORT_OVLP`, `EXPORT_H0`,
+  `MODIFY_H0`, `PYTHON_FUNC`.
+- `AimspyMatrix` — block-sparse matrix with `blocks` dict,
+  `from_aims_csr()` / `to_aims_csr()` converters.
+- `AimspyStructure` — structure + orbital descriptor (cached
+  `phase_factor`, `basis_subidx`, `atom_permutation`).
+- `ExternalMatrixSource` — `Protocol` with `to_aimspy(structure)`.
+- `DeepHData` — DeepH format reader/writer; see
+  `aimspy.interface.deeph`.
 
 ## Development
 
@@ -340,10 +263,24 @@ make lint       # ruff check + black --check
 make build      # build wheel
 ```
 
-## Licensing
+### Environment variables
+
+Integration tests and examples require `AIMSPY_TEST_AIMS_LIBPATH` to point
+at your patched `libaims.so`:
+
+```bash
+export AIMSPY_TEST_AIMS_LIBPATH=/path/to/FHI-aims-deeph/build/libaims.so
+```
+
+Optional:
+
+- `AIMSPY_TEST_NPROC` — MPI process count for `tests/test_strategies.py`
+  (default: `8`).
+
+## License
 
 AimSpy is released under **GPL-3.0-or-later** (see `LICENSE`).
 
-FHI-aims itself is **not** distributed with AimSpy and remains under its
-own licence agreement with the aims team. Users must obtain FHI-aims
-source code independently.
+FHI-aims itself is **not** distributed with AimSpy and remains under its own
+licence agreement with the aims team. Users must obtain FHI-aims source code
+independently.

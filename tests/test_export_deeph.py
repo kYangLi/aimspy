@@ -12,15 +12,16 @@ the reference (both are valid, just different sortings).  We compare
 entries pair-by-pair using a key lookup, which is order-independent.
 
 Usage:
-    source /home/deeph/software/env/IntelOneAPI/install/setvars.sh
+    source /path/to/intel/setvars.sh
     ulimit -s unlimited
-    cd /home/deeph/software/calc/aimspy/pyapi
-    mpirun -np 8 python tests/test_export_deeph.py
+    export AIMSPY_TEST_AIMS_LIBPATH=/path/to/libaims.so
+    mpiexec -np 8 python tests/test_export_deeph.py
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -33,16 +34,24 @@ from aimspy import Calculator, CalculatorConfig
 from aimspy.interface.deeph import DeepHData
 
 HERE = Path(__file__).resolve().parent
-LIB_PATH = Path(
-    "/home/deeph/software/calc/aimspy/FHI-aims-deeph/build/"
-    "libaims.250822_1.scalapack.mpi.so"
-)
 DATA_DIR = HERE / "data" / "MoS2"
 DEEPH_REF = DATA_DIR / "deeph_warm"
 DEEPH_OUT = DATA_DIR / "deeph_out"
 
 comm = MPI.COMM_WORLD
 rank = comm.rank
+
+_lib_env = os.environ.get("AIMSPY_TEST_AIMS_LIBPATH")
+if not _lib_env:
+    if rank == 0:
+        print(
+            "ERROR: AIMSPY_TEST_AIMS_LIBPATH environment variable not set.\n"
+            "  Export the path to your patched libaims.so before running:\n"
+            "    export AIMSPY_TEST_AIMS_LIBPATH=/path/to/libaims.so",
+            file=sys.stderr,
+        )
+    comm.Abort(1)
+LIB_PATH = Path(_lib_env)
 
 
 def _info(msg):

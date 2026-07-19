@@ -1,17 +1,18 @@
 #!/usr/bin/env python
-"""Integration test: Calculator warmstart via ``calc.modify()``.
+"""Integration test: Calculator warmstart via ``calc.modify_init_ham()``.
 
 Tests both direct source and deferred source modes.
 
 Usage:
-    source /home/deeph/software/env/IntelOneAPI/install/setvars.sh
+    source /path/to/intel/setvars.sh
     ulimit -s unlimited
-    cd /home/deeph/software/calc/aimspy/pyapi
-    mpirun -np 8 python tests/test_warmstart.py
+    export AIMSPY_TEST_AIMS_LIBPATH=/path/to/libaims.so
+    mpiexec -np 8 python tests/test_warmstart.py
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -24,15 +25,23 @@ from aimspy import Calculator, CalculatorConfig, Strategy
 from aimspy.interface.deeph import DeepHData
 
 HERE = Path(__file__).resolve().parent
-LIB_PATH = Path(
-    "/home/deeph/software/calc/aimspy/"
-    "FHI-aims-deeph/build/libaims.250822_1.scalapack.mpi.so"
-)
 DATA_DIR = HERE / "data" / "MoS2"
 DEEPH_DIR = DATA_DIR / "deeph_warm"
 
 comm = MPI.COMM_WORLD
 rank = comm.rank
+
+_lib_env = os.environ.get("AIMSPY_TEST_AIMS_LIBPATH")
+if not _lib_env:
+    if rank == 0:
+        print(
+            "ERROR: AIMSPY_TEST_AIMS_LIBPATH environment variable not set.\n"
+            "  Export the path to your patched libaims.so before running:\n"
+            "    export AIMSPY_TEST_AIMS_LIBPATH=/path/to/libaims.so",
+            file=sys.stderr,
+        )
+    comm.Abort(1)
+LIB_PATH = Path(_lib_env)
 
 if not DEEPH_DIR.is_dir():
     if rank == 0:
@@ -59,7 +68,7 @@ ref_H = ref_H.reshape(1, -1) if ref_H.ndim == 1 else ref_H
 # =============================================================================
 if rank == 0:
     print("=" * 60)
-    print("Test 1: Direct source (calc.modify(source=data))")
+    print("Test 1: Direct source (calc.modify_init_ham(source=data))")
     print("=" * 60)
 
 deeph_data = DeepHData.from_directory(DEEPH_DIR)
@@ -75,7 +84,7 @@ config = CalculatorConfig(
     log_level="INFO",
 )
 calc = Calculator(config)
-calc.modify(source=deeph_data, strategy=Strategy.REPLACE)
+calc.modify_init_ham(source=deeph_data, strategy=Strategy.REPLACE)
 
 try:
     calc.do(comm=comm, work_dir=DATA_DIR)
@@ -94,7 +103,7 @@ finally:
 if rank == 0:
     print()
     print("=" * 60)
-    print("Test 2: Deferred source (@calc.modify decorator)")
+    print("Test 2: Deferred source (@calc.modify_init_ham decorator)")
     print("=" * 60)
 
 config2 = CalculatorConfig(
@@ -106,14 +115,14 @@ config2 = CalculatorConfig(
 calc2 = Calculator(config2)
 
 
-@calc2.modify(strategy=Strategy.REPLACE, aux={"deeph_path": str(DEEPH_DIR)})
-def gen_source(calculator, aux):
+@calc2.modify_init_ham(strategy=Strategy.REPLACE, option={"deeph_path": str(DEEPH_DIR)})
+def gen_source(calculator, option):
     """Lazy source: read DeepH data at runtime (during python_func).
 
     At this point, calculator.initial_hamiltonian and calculator.overlap
     are available if capture_* was enabled.
     """
-    return DeepHData.from_directory(aux["deeph_path"])
+    return DeepHData.from_directory(option["deeph_path"])
 
 
 try:

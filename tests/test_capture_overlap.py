@@ -8,14 +8,15 @@ Verifies that with ``capture_overlap=True``:
 3. ``calc.overlap`` is accessible from INITED state (not requiring DONE).
 
 Usage:
-    source /home/deeph/software/env/IntelOneAPI/install/setvars.sh
+    source /path/to/intel/setvars.sh
     ulimit -s unlimited
-    cd /home/deeph/software/calc/aimspy/pyapi
-    mpirun -np 8 python tests/test_capture_overlap.py
+    export AIMSPY_TEST_AIMS_LIBPATH=/path/to/libaims.so
+    mpiexec -np 8 python tests/test_capture_overlap.py
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -27,14 +28,22 @@ from mpi4py import MPI
 from aimspy import Calculator, CalculatorConfig, AimspyMatrix
 
 HERE = Path(__file__).resolve().parent
-LIB_PATH = Path(
-    "/home/deeph/software/calc/aimspy/"
-    "FHI-aims-deeph/build/libaims.250822_1.scalapack.mpi.so"
-)
 DATA_DIR = HERE / "data" / "MoS2"
 
 comm = MPI.COMM_WORLD
 rank = comm.rank
+
+_lib_env = os.environ.get("AIMSPY_TEST_AIMS_LIBPATH")
+if not _lib_env:
+    if rank == 0:
+        print(
+            "ERROR: AIMSPY_TEST_AIMS_LIBPATH environment variable not set.\n"
+            "  Export the path to your patched libaims.so before running:\n"
+            "    export AIMSPY_TEST_AIMS_LIBPATH=/path/to/libaims.so",
+            file=sys.stderr,
+        )
+    comm.Abort(1)
+LIB_PATH = Path(_lib_env)
 
 all_ok = True
 
