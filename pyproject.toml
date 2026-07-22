@@ -17,7 +17,6 @@ keywords = [
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: POSIX :: Linux",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3 :: Only",
@@ -41,6 +40,22 @@ dev = [
     "pytest>=7.0",
     "ruff>=0.1.0",
     "black>=23.0",
+    # Documentation (inherit from docs)
+    "sphinx",
+    "sphinx-book-theme",
+    "sphinx-autobuild",
+    "myst_nb",
+    "sphinx-design",
+    "docutils",
+]
+
+docs = [
+    "sphinx",
+    "sphinx-book-theme",
+    "sphinx-autobuild",
+    "myst_nb",
+    "sphinx-design",
+    "docutils",
 ]
 
 [project.scripts]
