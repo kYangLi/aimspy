@@ -4,6 +4,71 @@ All notable changes to **aimspy** are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `tests/unit/test_force_close.py` — 9 unit tests for `force_close()` and
+  `CalcState` transitions (no MPI/libaims required).
+- `tests/conftest.py` — prevents pytest from collecting integration test
+  scripts (which require MPI).
+- `examples/continue_calc/run.py` — warmstart example using DeepH data
+  produced by `from_scratch/run.py`.
+- Makefile targets: `test-baseline`, `test-export-deeph`, `test-warmstart`,
+  `test-capture-overlap`, `test-regression`, `test-strategies`,
+  `test-integration`, `test-all`, `run-from-scratch`, `run-continue-calc`,
+  `run-example`.
+- `pyproject.toml`: `[tool.pytest.ini_options]` with `testpaths`.
+- `pyproject.toml`: 4 new classifiers (License GPLv3+, OS Linux, Audience
+  Science/Research, Python 3 :: Only).
+- `.gitignore`: `*.out`, `*.h5`, `tests/data/MoS2/deeph_out/`,
+  `tests/data/MoS2/_regression_*/`, `examples/*/deeph_data/`.
+- Integration tests now exit with code 1 on failure (previously always 0).
+
+### Changed
+
+- **CLI**: `aimspy patch --version` renamed to `--patch-version` to avoid
+  collision with Click's built-in `--version` flag.
+- `forces` property no longer has a state guard — returns `None` when
+  unavailable (before `calc()`, after `close()`, or `compute_forces` not
+  set) instead of raising `AimspyStateError`.
+- `logging.basicConfig()` at import time replaced with `NullHandler` —
+  aimspy no longer configures the root logger.
+- `Makefile build` target now produces both sdist and wheel (matches the
+  `publish.yaml` workflow).
+- `Makefile test` target now runs unit tests only (`pytest -v`);
+  integration tests run via `make test-integration`.
+- `Makefile clean` target now cleans test/example generated artifacts.
+- `AIMSPY_TEST_NPROC` default unified to 8 for both tests and examples.
+- README: `CalculatorConfig` types updated to `Path | str`; rank/opt-in
+  descriptions for `hamiltonian`/`overlap`/`initial_hamiltonian` clarified;
+  16 previously-undocumented public exports added to "Other public symbols".
+
+### Fixed
+
+- `DeepHData.from_memory`: empty dict `{}` for `hamiltonian_blocks`,
+  `overlap_blocks`, or `initial_hamiltonian_blocks` now correctly produces
+  `None` entries instead of mis-storing data or filling zeros.
+- `DeepHData.save_hamiltonian` / `save_overlap` / `save_initial_hamiltonian`:
+  now raise `AimspyConfigError` (was `ValueError`) — completes the
+  standardization claimed in v0.2.0.
+- `libloader.py`: MPI CDLL now anchored at module level to prevent GC
+  from `dlclose`-ing it and removing RTLD_GLOBAL symbols.
+- `export_ovlp` / `export_h0` callback wrappers now set
+  `writeable=False` on the numpy view to protect Fortran `intent(in)`
+  arrays from accidental modification.
+- `AimspyInfo.from_c` renamed to `_from_c` (internal API, was
+  incorrectly public).
+- Removed dead `CallbackSpec` fields: `property_name`, `property_doc`,
+  `raw_value_key`.
+- `tests/test_strategies.py` / `test_regression.py` / `test_warmstart.py`:
+  `deeph_warm` → `deeph_out` (use live-generated data, not stale reference).
+- `tests/test_export_deeph.py`: removed DeepH-vs-DeepH comparison against
+  non-existent `deeph_warm/` reference; replaced with cross-validation
+  against in-memory matrices and `rs_hamiltonian.out`.
+- CLI exception handling broadened to catch `OSError` /
+  `subprocess.SubprocessError` (was only `KeyError` / `RuntimeError`).
+
 ## [0.2.0] - 2026-07-19
 
 ### Added
@@ -21,8 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rank 0 before `aimspy_init`.
 - `AimspyCallbackError.callback_errors` attribute — preserves
   `(name, exception, traceback_str)` tuples for post-mortem inspection.
-- Unit test suite in `tests/unit/` (57 tests, no MPI/libaims required):
-  `test_structure`, `test_protocol_enum`, `test_poscar`, `test_deeph_data`.
+- Unit test suite in `tests/unit/` (66 tests, no MPI/libaims required):
+  `test_structure`, `test_protocol_enum`, `test_poscar`, `test_deeph_data`,
+  `test_force_close`.
 - `tests/test_strategies.py` — `Strategy.ADD` / `SCALE` / `CUSTOM` via
   sub-MPI dispatch (FHI-aims is a global Fortran singleton).
 - `tests/test_capture_overlap.py` — live overlap on all ranks + two-step API.
@@ -44,7 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `orbit_per_atom`, `atom_permutation`) cached via
   `@functools.cached_property`.
 - `basis_subidx` / `orbit_per_atom` vectorized (no Python loops).
-- State guards added to `info`, `structure`, `forces`, `overlap` properties.
+- State guards added to `info`, `structure`, `overlap` properties.
 - Logging: INFO/WARNING emitted on rank 0 only; ERROR on all ranks.
 - `register_callback` from `DONE` state now emits a `UserWarning` (the
   callback will not fire).

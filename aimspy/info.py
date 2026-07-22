@@ -32,4 +32,4 @@ def load_info(binding: BindingLib) -> AimspyInfo:
     ptr = binding.aimspy_get_info()
     if not ptr:
         raise AimspyBindingError("aimspy_get_info() returned NULL")
-    return AimspyInfo.from_c(ptr.contents)
+    return AimspyInfo._from_c(ptr.contents)

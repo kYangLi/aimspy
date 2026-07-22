@@ -7,6 +7,7 @@ lives in :mod:`aimspy._patches._apply`; this module is a thin front-end.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,7 +31,7 @@ def main() -> None:
     required=False,
 )
 @click.option(
-    "--version",
+    "--patch-version",
     "-v",
     "version",
     default=None,
@@ -79,7 +80,7 @@ def patch(
         else:
             target = _apply.find_patch(version) if version else _apply.latest_patch()
             _do_apply_flow(source, target, check=check, no_git=no_git, yes=yes)
-    except (KeyError, RuntimeError) as e:
+    except (KeyError, RuntimeError, OSError, subprocess.SubprocessError) as e:
         click.echo(str(e), err=True)
         sys.exit(2)
 

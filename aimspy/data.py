@@ -83,8 +83,8 @@ class AimspyInfo:
     )
 
     @classmethod
-    def from_c(cls, c_info) -> "AimspyInfo":
-        """Build from a populated ``AimspyInfoC`` ctypes struct."""
+    def _from_c(cls, c_info) -> "AimspyInfo":
+        """Build from a populated ``AimspyInfoC`` ctypes struct (internal)."""
         return _aimspy_info_from_c(c_info)
 
     def __repr__(self) -> str:
@@ -124,7 +124,7 @@ class CsrMatrixDescriptor:
 
 
 # =============================================================================
-# Internal helpers (used by AimspyInfo.from_c and CsrMatrixDescriptor._from_c_struct)
+# Internal helpers (used by AimspyInfo._from_c and CsrMatrixDescriptor._from_c_struct)
 # =============================================================================
 def _view_generic(ptr, shape, ctypes_dtype, numpy_order="C"):
     """Generalised helper: raw ptr -> C-contiguous ndarray copy.

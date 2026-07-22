@@ -48,11 +48,6 @@ class CallbackSpec:
     register_arg_count : int
         Number of args the C register function takes *after* the CFUNCTYPE
         wrapper.  2 = (cb, aux); 3 = (cb, aux, extra_c_ptr).
-    property_name : str or None
-        Reserved for documentation / future auto-property generation.
-        Currently always None — Calculator wires its own inline closures.
-    property_doc : str or None
-        Docstring for the (future, optional) auto-generated property.
     trigger_stage : str
         Human-readable description of when the callback fires (for docs).
     fortran_module : str
@@ -63,11 +58,8 @@ class CallbackSpec:
     ctypes_type: Type[CFUNCTYPE]
     register_symbol: str
     register_arg_count: int = 2
-    property_name: Optional[str] = None
-    property_doc: Optional[str] = None
     trigger_stage: str = ""
     fortran_module: str = ""
-    raw_value_key: Optional[str] = None
 
 
 # =========================================================================
@@ -187,6 +179,7 @@ class CallbackManager:
                 _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
                 try:
                     ovlp = _ptr_to_view(ovlp_ptr, (int(n_spin), int(n_ham)))
+                    ovlp.flags.writeable = False  # Fortran intent(in)
                     fn(_aux, ovlp, int(n_ham), int(n_spin))
                 except Exception as exc:
                     _record_callback_error(mgr, spec.name, exc)
@@ -197,6 +190,7 @@ class CallbackManager:
                 _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
                 try:
                     h0 = _ptr_to_view(h0_ptr, (int(n_spin), int(n_ham)))
+                    h0.flags.writeable = False  # Fortran intent(in)
                     fn(_aux, h0, int(n_ham), int(n_spin))
                 except Exception as exc:
                     _record_callback_error(mgr, spec.name, exc)

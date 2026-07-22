@@ -44,7 +44,7 @@ index bb052399..68afa156 100644
  # ASI API
  target_sources(aims1 PRIVATE dft_api_data.f90 dft_api.f90 apicallback.f90)
  
-+# AimSpy API
++# AimsPy API
 +add_subdirectory(aimspy_api)
 +
  # i-Pi Python interface
@@ -56,7 +56,7 @@ index 00000000..4abdeabf
 --- /dev/null
 +++ b/src/aimspy_api/CMakeLists.txt
 @@ -0,0 +1,15 @@
-+# AimSpy API
++# AimsPy API
 +# These files are added to aims1, same layer as ASI API files.
 +
 +target_sources(aims1 PRIVATE

@@ -108,6 +108,49 @@ class TestFromMemory:
         # Mo has 5 shells: (2l+1) for each: 1+1+3+5+7 = 17
         assert dd.n_basis == 17
 
+    def test_from_memory_empty_hamiltonian_dict_overlap_only(self):
+        """Empty hamiltonian_blocks={} should NOT store overlap as Hamiltonian."""
+        s_blocks = {(0, 0, 0, 0, 0): np.array([[0.5]])}
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3),
+            atom_symbols=["H"],
+            atom_coords=np.zeros((1, 3)),
+            elements_orbital_map={"H": [0]},
+            hamiltonian_blocks={},
+            overlap_blocks=s_blocks,
+        )
+        assert dd.entries is None
+        assert dd.overlap_entries is not None
+        assert dd.overlap_entries[0] == pytest.approx(0.5)
+
+    def test_from_memory_empty_overlap_dict(self):
+        """Empty overlap_blocks={} should produce overlap_entries=None."""
+        h_blocks = {(0, 0, 0, 0, 0): np.array([[1.0]])}
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3),
+            atom_symbols=["H"],
+            atom_coords=np.zeros((1, 3)),
+            elements_orbital_map={"H": [0]},
+            hamiltonian_blocks=h_blocks,
+            overlap_blocks={},
+        )
+        assert dd.entries is not None
+        assert dd.overlap_entries is None
+
+    def test_from_memory_empty_init_ham_dict(self):
+        """Empty initial_hamiltonian_blocks={} should produce initial_hamiltonian_entries=None."""
+        h_blocks = {(0, 0, 0, 0, 0): np.array([[1.0]])}
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3),
+            atom_symbols=["H"],
+            atom_coords=np.zeros((1, 3)),
+            elements_orbital_map={"H": [0]},
+            hamiltonian_blocks=h_blocks,
+            initial_hamiltonian_blocks={},
+        )
+        assert dd.entries is not None
+        assert dd.initial_hamiltonian_entries is None
+
 
 # =============================================================================
 # Tests: set_* methods

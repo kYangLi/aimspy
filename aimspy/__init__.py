@@ -1,4 +1,4 @@
-"""AimSpy — Pure-Python in-memory interface to FHI-aims via ctypes.
+"""AimsPy — Pure-Python in-memory interface to FHI-aims via ctypes.
 
 For seamless integration with DeepX / DeepH-pack.
 

@@ -41,6 +41,14 @@ if not _lib_env:
     sys.exit(1)
 LIB_PATH = _lib_env
 
+if not (DATA_DIR / "rs_hamiltonian.out").is_file():
+    print(
+        f"ERROR: {DATA_DIR / 'rs_hamiltonian.out'} not found.\n"
+        "  Run 'make test-baseline' first.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 ref_H = np.loadtxt(DATA_DIR / "rs_hamiltonian.out", dtype=np.float64)
 ref_H = ref_H.reshape(1, -1) if ref_H.ndim == 1 else ref_H
 
@@ -91,7 +99,16 @@ def run_children():
 
     comm = MPI.COMM_WORLD
     rank = comm.rank
-    deeph_dir = DATA_DIR / "deeph_warm"
+    deeph_dir = DATA_DIR / "deeph_out"
+
+    if not deeph_dir.is_dir():
+        if rank == 0:
+            print(
+                f"ERROR: {deeph_dir} not found.\n"
+                "  Run 'make test-export-deeph' first to generate DeepH data.",
+                file=sys.stderr,
+            )
+        sys.exit(1)
 
     config = CalculatorConfig(
         lib_path=LIB_PATH,
@@ -179,6 +196,8 @@ def main():
     else:
         print("SOME STRATEGY TESTS FAILED")
     print("=" * 60)
+    if not all_ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,6 @@ Usage:
     source /path/to/intel/setvars.sh
     ulimit -s unlimited
     export AIMSPY_TEST_AIMS_LIBPATH=/path/to/libaims.so
-    cd /path/to/examples/from_scratch
     mpiexec -np 4 python run.py
 """
 
@@ -46,7 +45,7 @@ config = CalculatorConfig(
 )
 
 with Calculator(config) as calc:
-    calc.do(comm=comm, work_dir=".")
+    calc.do(comm=comm, work_dir=Path(__file__).resolve().parent)
 
     if rank == 0:
         R = calc.structure
@@ -62,8 +61,9 @@ with Calculator(config) as calc:
 
 # Export H + S + H_init to DeepH format (rank 0 only).
 if rank == 0:
+    out_dir = Path(__file__).resolve().parent / "deeph_data"
     data_mgr = DeepHData.from_aimspy(
         structure=R, hamiltonian=H, overlap=S, initial_hamiltonian=H_init
     )
-    data_mgr.save("./deeph_data")
-    print("[info] DeepH data saved to ./deeph_data")
+    data_mgr.save(out_dir)
+    print(f"[info] DeepH data saved to {out_dir}")

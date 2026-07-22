@@ -24,7 +24,6 @@ class TestStrategy:
     def test_strategy_from_uppercase_string(self):
         """modify() accepts and lowercases string strategies."""
         from aimspy import Calculator, CalculatorConfig
-        from aimspy.interface.deeph import DeepHData
 
         # Need a source for direct REPLACE mode
         dd = DeepHData.__new__(DeepHData)

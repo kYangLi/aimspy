@@ -47,6 +47,7 @@ config = CalculatorConfig(
 )
 calc = Calculator(config)
 
+_baseline_ok = False
 try:
     calc.do(comm=comm, work_dir=DATA_DIR)
     if rank == 0:
@@ -64,9 +65,13 @@ try:
         print(f"[baseline] max|H_ref|   = {np.max(np.abs(ref_H)):.6e} Hartree")
         print(f"[baseline] H[0, 0]     = {H[0, 0]:.6e} Hartree")
         print(f"[baseline] ref_H[0, 0] = {ref_H[0, 0]:.6e} Hartree")
-        print(f"[baseline] close to ref = {np.allclose(H, ref_H, atol=1e-6)}")
+        _baseline_ok = np.allclose(H, ref_H, atol=1e-6)
+        print(f"[baseline] close to ref = {_baseline_ok}")
         print(f"[baseline] energy = {calc.energy:.6f} Hartree")
-        print("BASELINE TEST PASSED")
+        if _baseline_ok:
+            print("BASELINE TEST PASSED")
+        else:
+            print("BASELINE TEST FAILED")
 except Exception:
     import traceback
 
@@ -76,3 +81,6 @@ except Exception:
 finally:
     calc.close()
     comm.Barrier()
+
+if rank == 0 and not _baseline_ok:
+    sys.exit(1)

@@ -91,7 +91,7 @@ from .matrix import (
 )
 
 _log = logging.getLogger("aimspy")
-logging.basicConfig(level=logging.WARNING)
+_log.addHandler(logging.NullHandler())
 
 
 # =============================================================================
@@ -466,6 +466,11 @@ class Calculator:
     # ==================================================================
     @property
     def info(self) -> AimspyInfo:
+        """Runtime snapshot of FHI-aims dimensions and basis info (all ranks).
+
+        Raises :class:`AimspyStateError` if accessed before :meth:`init`
+        or after finalization.
+        """
         if self._info is None:
             if self._state == CalcState.UNINIT:
                 hint = "call init() first"
@@ -480,6 +485,11 @@ class Calculator:
 
     @property
     def structure(self) -> AimspyStructure:
+        """Structure + orbital descriptor (all ranks).
+
+        Raises :class:`AimspyStateError` if accessed before :meth:`init`
+        or after finalization.
+        """
         if self._structure is None:
             if self._state == CalcState.UNINIT:
                 hint = "call init() first"
@@ -494,10 +504,12 @@ class Calculator:
 
     @property
     def work_dir(self) -> Optional[Path]:
+        """Working directory passed to :meth:`init` (``None`` before init)."""
         return self._work_dir
 
     @property
     def comm(self) -> Any:
+        """MPI communicator passed to :meth:`init` (``None`` before init)."""
         return self._comm
 
     @property
@@ -517,29 +529,30 @@ class Calculator:
     def forces(self) -> Optional[np.ndarray]:
         """Total atomic forces, shape (n_atoms, 3), units eV/Å.
 
-        Eagerly captured at the end of :meth:`calc` and cached. Available
-        in ``DONE`` (and ``RUNNING`` if accessed from a callback after SCF
-        completion).
+        Eagerly captured at the end of :meth:`calc` and cached on
+        ``self._forces``.  Returns ``None`` when forces are not available:
 
-        Returns ``None`` when forces are not available:
-
-        - Before :meth:`calc` is called
+        - Before :meth:`calc` is called (``self._forces`` is ``None``)
         - ``compute_forces .true.`` not set in ``control.in``
-        - :meth:`calc` raised before forces were captured (FAILED state)
-        - After :meth:`close` (state FINALIZED)
+        - After :meth:`close` / :meth:`force_close` (state cleared)
         """
-        self._state_guard(
-            CalcState.DONE, "read forces", allowed={CalcState.RUNNING, CalcState.DONE}
-        )
         return self._forces
 
     @property
     def rs_hamiltonian(self) -> np.ndarray:
+        """Raw CSR-flat Hamiltonian, shape ``(n_spin, n_ham_size)`` (rank 0).
+
+        Available in ``DONE`` state only.
+        """
         self._state_guard(CalcState.DONE, "read rs_hamiltonian")
         return get_rs_hamiltonian(self._binding, self.info.n_spin, self.info.n_ham_size)
 
     @property
     def rs_overlap(self) -> np.ndarray:
+        """Raw flat overlap array (rank 0).
+
+        Available from ``INITED`` onwards (overlap is built pre-SCF).
+        """
         self._state_guard(
             CalcState.INITED,
             "read rs_overlap",
@@ -549,12 +562,14 @@ class Calculator:
 
     @property
     def csr_descr(self) -> Optional[CsrMatrixDescriptor]:
+        """CSR matrix layout descriptor, or ``None`` before :meth:`init`."""
         if self._runtime_aux is None:
             return None
         return self._runtime_aux.get("csr_descr")
 
     @property
     def hamiltonian(self) -> AimspyMatrix:
+        """Converged Hamiltonian as :class:`AimspyMatrix` (rank 0, ``DONE`` only)."""
         self._state_guard(CalcState.DONE, "read hamiltonian")
         csr = self.csr_descr
         if csr is None:
@@ -769,7 +784,12 @@ class Calculator:
         aux : any
             Arbitrary Python object passed through to the callback.
         extra_ptr : int or None
-            Extra c-pointer for 3-arg register functions.
+            Extra c-pointer for 3-arg register functions (only
+            ``modify_h0``).  **Note**: the Calculator's built-in
+            ``modify_h0`` wrapper does not forward ``extra_ptr`` to the
+            user callback — external matrix data is delivered via the
+            ``python_func`` callback + ``aux['external_aimspy']`` instead.
+            This parameter is primarily for Calculator-internal use.
         """
         if isinstance(name, CallbackName):
             name = name.value

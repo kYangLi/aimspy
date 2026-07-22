@@ -430,7 +430,7 @@ class DeepHData:
             entries_lst.append(np.ascontiguousarray(block, dtype=np.float64).ravel())
             chunk_boundaries[ip + 1] = chunk_boundaries[ip] + nr * nc
 
-            if overlap_blocks is not None:
+            if overlap_blocks:
                 blk = overlap_blocks.get(key)
                 if blk is not None:
                     overlap_lst.append(
@@ -439,7 +439,7 @@ class DeepHData:
                 else:
                     overlap_lst.append(np.zeros(nr * nc, dtype=np.float64))
 
-            if initial_hamiltonian_blocks is not None:
+            if initial_hamiltonian_blocks:
                 blk = initial_hamiltonian_blocks.get(key)
                 if blk is not None:
                     init_ham_lst.append(
@@ -449,7 +449,7 @@ class DeepHData:
                     init_ham_lst.append(np.zeros(nr * nc, dtype=np.float64))
 
         entries = None
-        if hamiltonian_blocks is not None:
+        if hamiltonian_blocks:
             entries = np.concatenate(entries_lst)
             entries *= HARTREE_TO_EV  # Hartree → eV
 
@@ -627,7 +627,7 @@ class DeepHData:
     def save_hamiltonian(self, path: Optional[Union[str, Path]] = None) -> None:
         """Write hamiltonian.h5 (requires entries to be set)."""
         if self.entries is None:
-            raise ValueError("No Hamiltonian entries to save")
+            raise AimspyConfigError("No Hamiltonian entries to save")
         p = Path(path) if path is not None else self._require_path()
         p.mkdir(parents=True, exist_ok=True)
         self._write_matrix_h5(p / "hamiltonian.h5", self.entries)
@@ -635,7 +635,7 @@ class DeepHData:
     def save_overlap(self, path: Optional[Union[str, Path]] = None) -> None:
         """Write overlap.h5 (requires overlap_entries to be set)."""
         if self.overlap_entries is None:
-            raise ValueError("No overlap entries to save")
+            raise AimspyConfigError("No overlap entries to save")
         p = Path(path) if path is not None else self._require_path()
         p.mkdir(parents=True, exist_ok=True)
         self._write_matrix_h5(p / "overlap.h5", self.overlap_entries)
@@ -643,7 +643,7 @@ class DeepHData:
     def save_initial_hamiltonian(self, path: Optional[Union[str, Path]] = None) -> None:
         """Write hamiltonian_init.h5 (requires initial_hamiltonian_entries)."""
         if self.initial_hamiltonian_entries is None:
-            raise ValueError("No initial Hamiltonian entries to save")
+            raise AimspyConfigError("No initial Hamiltonian entries to save")
         p = Path(path) if path is not None else self._require_path()
         p.mkdir(parents=True, exist_ok=True)
         self._write_matrix_h5(

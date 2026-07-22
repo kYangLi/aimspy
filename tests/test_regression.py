@@ -35,7 +35,7 @@ from aimspy.interface.deeph import DeepHData
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE / "data" / "MoS2"
-DEEPH_DIR = DATA_DIR / "deeph_warm"
+DEEPH_DIR = DATA_DIR / "deeph_out"
 
 comm = MPI.COMM_WORLD
 rank = comm.rank
@@ -51,6 +51,24 @@ if not _lib_env:
         )
     comm.Abort(1)
 LIB_PATH = Path(_lib_env)
+
+if not (DATA_DIR / "rs_hamiltonian.out").is_file():
+    if rank == 0:
+        print(
+            f"ERROR: {DATA_DIR / 'rs_hamiltonian.out'} not found.\n"
+            "  Run 'make test-baseline' first.",
+            file=sys.stderr,
+        )
+    sys.exit(1)
+
+if not DEEPH_DIR.is_dir():
+    if rank == 0:
+        print(
+            f"ERROR: {DEEPH_DIR} not found.\n"
+            "  Run 'make test-export-deeph' first to generate DeepH data.",
+            file=sys.stderr,
+        )
+    sys.exit(1)
 
 errors: list[str] = []
 n_checks = 0
@@ -269,8 +287,8 @@ try:
         check("from_directory n_pairs", dd.n_pairs > 0)
         check(
             "from_directory entries (eV)",
-            abs(dd.entries[0]) > 100,
-            f"first entry = {dd.entries[0]:.1f}",
+            np.max(np.abs(dd.entries)) > 100,
+            f"max|entry| = {np.max(np.abs(dd.entries)):.1f}",
         )
 
         tmp_dir = DATA_DIR / "_regression_deeph"
@@ -307,3 +325,5 @@ if rank == 0:
     else:
         print(f"{'='*60}")
         print("ALL REGRESSION CHECKS PASSED")
+    if errors:
+        sys.exit(1)

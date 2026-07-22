@@ -161,3 +161,5 @@ if rank == 0:
     else:
         print("SOME CAPTURE_OVERLAP TESTS FAILED")
     print("=" * 60)
+    if not all_ok:
+        sys.exit(1)

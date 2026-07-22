@@ -26,7 +26,7 @@ from aimspy.interface.deeph import DeepHData
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE / "data" / "MoS2"
-DEEPH_DIR = DATA_DIR / "deeph_warm"
+DEEPH_DIR = DATA_DIR / "deeph_out"
 
 comm = MPI.COMM_WORLD
 rank = comm.rank
@@ -45,7 +45,11 @@ LIB_PATH = Path(_lib_env)
 
 if not DEEPH_DIR.is_dir():
     if rank == 0:
-        print(f"ERROR: deeph_warm dir not found at {DEEPH_DIR}", file=sys.stderr)
+        print(
+            f"ERROR: {DEEPH_DIR} not found.\n"
+            "  Run 'make test-export-deeph' first to generate DeepH data.",
+            file=sys.stderr,
+        )
     sys.exit(1)
 
 
@@ -147,3 +151,5 @@ if rank == 0:
     else:
         print("SOME TESTS FAILED")
     print("=" * 60)
+    if not (ok1 and ok2):
+        sys.exit(1)
