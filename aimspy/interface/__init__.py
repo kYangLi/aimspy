@@ -1,7 +1,7 @@
 """Public — external-format interface layer.
 
 External format data classes (e.g.
-:class:`aimspy.interface.deeph.DeepHData`) provide a
+:class:`aimspy.DeepHData`) provide a
 ``to_aimspy(structure) -> AimspyMatrix`` method for use with
 :meth:`aimspy.Calculator.modify_init_ham` (via ``source=``).
 
@@ -28,7 +28,7 @@ class ExternalMatrixSource(Protocol):
     satisfies this protocol (structural typing / duck typing).
 
     Implementations:
-      - :class:`aimspy.interface.deeph.DeepHData`
+      - :class:`aimspy.DeepHData`
     """
 
     def to_aimspy(self, structure: "AimspyStructure") -> "AimspyMatrix": ...

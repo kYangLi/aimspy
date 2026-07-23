@@ -26,7 +26,7 @@ import numpy as np
 from mpi4py import MPI
 
 from aimspy import Calculator, CalculatorConfig
-from aimspy.interface.deeph import DeepHData
+from aimspy import DeepHData
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE / "data" / "MoS2"

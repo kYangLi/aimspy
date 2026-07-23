@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from aimspy import Strategy, CallbackName, ExternalMatrixSource, AimspyConfigError
-from aimspy.interface.deeph import DeepHData
+from aimspy import DeepHData
 
 
 class TestStrategy:

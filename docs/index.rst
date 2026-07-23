@@ -8,7 +8,7 @@ AimsPy
 
 ----
 
-`AimsPy <https://github.com/kYangLi/aimspy>`_ drives `FHI-aims <https://aims-code.rg.mpg.de/>`_ DFT calculations directly from Python — no subprocess, no file-staged I/O on hot paths — by loading a patched ``libaims.so`` via ``ctypes`` and exchanging matrices in memory through a callback framework. It is designed as the FHI-aims binding layer of the `DeepH <https://github.com/kYangLi/DeepH-pack-docs>`_ ecosystem, and the central enabler of **warmstart SCF**: injecting an externally-predicted Hamiltonian (e.g. from a DeepH-trained model) as the initial guess so that a single SCF iteration reproduces the converged result.
+`AimsPy <https://github.com/kYangLi/aimspy>`_ drives `FHI-aims <https://www.fhi-aims.org/>`_ DFT calculations directly from Python — no subprocess, no file-staged I/O on hot paths — by loading a patched ``libaims.so`` via ``ctypes`` and exchanging matrices in memory through a callback framework. It is designed as the FHI-aims binding layer of the `DeepH <https://github.com/kYangLi/DeepH-pack-docs>`_ ecosystem, and the central enabler of **warmstart SCF**: injecting an externally-predicted Hamiltonian (e.g. from a DeepH-trained model) as the initial guess so that SCF converges rapidly in several iterations.
 
 AimsPy also establishes a uniform in-memory representation of block-sparse real-space matrices — ``AimspyMatrix`` — that round-trips between FHI-aims' internal CSR layout and the DeepH on-disk format with documented sign/parity conventions, making it equally useful as a standalone post-processing interface for FHI-aims users.
 
@@ -20,6 +20,18 @@ Features
     .. grid-item::
         :columns: 12 12 12 6
 
+        .. card:: Bundled FHI-aims Patch
+            :class-card: sd-border-0
+            :shadow: none
+            :class-title: sd-fs-5
+
+            .. div:: sd-font-normal
+
+                ``aimspy patch`` applies, uninstalls, and lists versioned patches against an FHI-aims source tree — no manual editing. No manual code editing required.
+
+    .. grid-item::
+        :columns: 12 12 12 6
+
         .. card:: In-Memory SCF
             :class-card: sd-border-0
             :shadow: none
@@ -27,7 +39,19 @@ Features
 
             .. div:: sd-font-normal
 
-                Load ``libaims.so`` once and drive the full SCF cycle from Python via ``ctypes``. No subprocess, no file-staged I/O on the hot path — Hamiltonian, overlap, energy, and forces are exchanged as in-memory arrays through a callback framework.
+                Run FHI-aims SCF calculations directly from Python — no subprocess, no file I/O on the critical path. Hamiltonian, overlap, energy, and forces are returned as native Python objects, ready for analysis or downstream processing.
+
+    .. grid-item::
+        :columns: 12 12 12 6
+
+        .. card:: DeepH Export
+            :class-card: sd-border-0
+            :shadow: none
+            :class-title: sd-fs-5
+
+            .. div:: sd-font-normal
+
+                Export converged Hamiltonian, overlap, and free-atom initial Hamiltonian to the DeepH on-disk format in a single pipeline — ideal for generating training data for DeepH models.
 
     .. grid-item::
         :columns: 12 12 12 6
@@ -39,7 +63,7 @@ Features
 
             .. div:: sd-font-normal
 
-                Inject an external Hamiltonian (e.g. a DeepH prediction) as the initial guess and converge SCF in a single iteration. Four strategies — ``REPLACE``, ``ADD``, ``SCALE``, ``CUSTOM`` — cover warmstart, perturbation, scaling, and arbitrary user transforms.
+                Provide a pre-trained Hamiltonian (e.g. from a DeepH model) as the initial guess, and SCF converges in several iterations instead of the usual 10+. Strategies — ``REPLACE``, ``ADD``, ``SCALE``, ``CUSTOM`` — cover warmstart, correction (Delta-prediction), scaling, and custom transforms.
 
     .. grid-item::
         :columns: 12 12 12 6
@@ -51,19 +75,7 @@ Features
 
             .. div:: sd-font-normal
 
-                The ``ExternalMatrixSource`` protocol accepts any object with ``to_aimspy(structure) -> AimspyMatrix``. A reference ``DeepHData`` adapter ships built-in; adding a new format is a single subpackage under ``aimspy/interface/``.
-
-    .. grid-item::
-        :columns: 12 12 12 6
-
-        .. card:: Bundled FHI-aims Patch
-            :class-card: sd-border-0
-            :shadow: none
-            :class-title: sd-fs-5
-
-            .. div:: sd-font-normal
-
-                ``aimspy patch`` applies, uninstalls, and lists versioned diffs against an FHI-aims source tree — no manual editing. The patch exposes five Fortran callback hook points and the warmstart short-circuit inside ``initialize_scf.f90``.
+                Use any Hamiltonian source for warmstart — the built-in ``DeepHData`` adapter reads DeepH-format data directly, and adding a new format is just one subpackage under ``aimspy/interface/``.
 
 Installation
 ^^^^^^^^^^^^
@@ -142,6 +154,9 @@ If you use this code in your academic work, please cite **the complete package f
 
     installation_and_setup
     basic_usage
+    cli
     key_concepts
+    api_reference
     for_developers/index
+    troubleshooting
     citation_and_license

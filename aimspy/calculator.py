@@ -22,7 +22,7 @@ Two-step (advanced; e.g. to register callbacks between init and calc)::
 Warmstart with DeepH data (direct source)::
 
     from aimspy import Calculator, CalculatorConfig, Strategy
-    from aimspy.interface.deeph import DeepHData
+    from aimspy import DeepHData
 
     data = DeepHData.from_directory("deeph_warm/")
     config = CalculatorConfig(lib_path="/path/to/libaims.so")
@@ -199,9 +199,9 @@ class Calculator:
     .. note::
 
         **Rank-0-only properties**: The following properties read from
-        Fortran rank-0-only buffers and return ``None`` or raise on
-        non-root ranks: ``rs_hamiltonian``, ``rs_overlap``, ``hamiltonian``,
-        ``overlap`` (without ``capture_overlap=True``).
+        Fortran rank-0-only buffers and raise :class:`AimspyBindingError`
+        on non-root ranks: ``rs_hamiltonian``, ``rs_overlap``,
+        ``hamiltonian``, ``overlap`` (without ``capture_overlap=True``).
         Properties available on all ranks: ``info``, ``structure``,
         ``csr_descr``, ``energy``, ``forces``, ``initial_hamiltonian``
         (with ``capture_initial_hamiltonian=True``), ``overlap`` (with
@@ -214,6 +214,19 @@ class Calculator:
         /,
         **kwargs,
     ) -> None:
+        """Initialize the Calculator.
+
+        Parameters
+        ----------
+        config : CalculatorConfig or None
+            Full configuration object. If ``None``, a
+            :class:`CalculatorConfig` is built from *kwargs*.
+        **kwargs
+            Convenience for passing :class:`CalculatorConfig` fields
+            directly (e.g. ``Calculator(lib_path=...)``). Mutually
+            exclusive with *config*; passing both raises
+            :class:`AimspyConfigError`.
+        """
         if config is None:
             config = CalculatorConfig(**kwargs)
         elif kwargs:
@@ -516,9 +529,9 @@ class Calculator:
     def energy(self) -> float:
         """SCF total energy (Hartree).
 
-        Available in ``DONE`` state. Also readable in ``RUNNING`` (inside
-        a callback during pre-SCF), but the value may be uninitialized
-        before the first SCF iteration completes.
+        Available in ``DONE`` state. Also accessible in ``RUNNING``
+        (e.g. from inside a callback during pre-SCF), but the value
+        may be uninitialized before the first SCF iteration completes.
         """
         self._state_guard(
             CalcState.DONE, "read energy", allowed={CalcState.RUNNING, CalcState.DONE}
@@ -635,6 +648,14 @@ class Calculator:
 
         Must be called before :meth:`do` / :meth:`init`.
 
+        .. warning::
+
+            This method has no state guard. Calling it after
+            :meth:`init` or :meth:`do` sets ``self._modify`` but the
+            callback wiring (``_wire_callbacks``) has already run, so
+            the modification will **silently have no effect**. Always
+            call before ``init()`` / ``do()``.
+
         **Direct mode** (pre-built source or source-less strategy)::
 
             calc.modify_init_ham(source=data, strategy=Strategy.REPLACE)
@@ -656,7 +677,7 @@ class Calculator:
         ``export_h0`` and ``modify_h0`` in ``initialize_scf.f90``),
         with access to the live :class:`Calculator` object. The returned
         source must have a ``to_aimspy(structure) -> AimspyMatrix``
-        method (e.g. :class:`~aimspy.interface.deeph.DeepHData`).
+        method (e.g. :class:`~aimspy.DeepHData`).
 
         Parameters
         ----------

@@ -1,12 +1,13 @@
 """Private — core callback types: CallbackSpec + CallbackManager.
 
-Adding a new callback to the system requires touching 4 well-defined
-places:
+Adding a new callback to the system requires touching the following
+well-defined places:
 
   1.  Fortran side (via patch): type + register + trigger subroutine
   2.  ``_binding/callback_types.py``:  one CFUNCTYPE declaration
   3.  ``_binding/prototypes.py``:  one _PROTOTYPES entry
   4.  ``_callbacks/registry.py``:  one CallbackSpec entry
+  5.  ``_callbacks/base.py``:  one branch in ``_build_ctypes_wrapper``
 
 The ``Calculator._wire_callbacks`` method registers its own inline
 closures for each needed callback, bypassing any "default

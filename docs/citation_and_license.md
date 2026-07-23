@@ -2,7 +2,27 @@
 
 ## Citation
 
-If you use this code in your academic work, please cite **the complete package featuring the latest implementation, methodology, and workflow of [DeepH](https://github.com/kYangLi/DeepH-pack-docs)**:
+Since AimsPy drives FHI-aims calculations, please cite the **FHI-aims** original paper:
+
+[Volker Blum, Ralf Gehrke, Felix Hanke, Paula Havu, Ville Havu, Xinguo Ren, Karsten Reuter, Matthias Scheffler. Ab initio molecular simulations with numeric atom-centered orbitals. Computer Physics Communications 180(11), 2175–2196 (2009)](https://doi.org/10.1016/j.cpc.2009.06.022)
+
+```bibtex
+@article{BLUM20092175,
+    title = {Ab initio molecular simulations with numeric atom-centered orbitals},
+    journal = {Computer Physics Communications},
+    volume = {180},
+    number = {11},
+    pages = {2175--2196},
+    year = {2009},
+    issn = {0010-4655},
+    doi = {https://doi.org/10.1016/j.cpc.2009.06.022},
+    url = {https://www.sciencedirect.com/science/article/pii/S0010465509002033},
+    author = {Volker Blum and Ralf Gehrke and Felix Hanke and Paula Havu and Ville Havu and Xinguo Ren and Karsten Reuter and Matthias Scheffler},
+    keywords = {molecular simulations, Density-functional theory, Atom-centered basis functions, Hartree--Fock, MP2, O(N) DFT, self-energy}
+}
+```
+
+If you use this code in your academic work, please also cite **the complete package featuring the latest implementation, methodology, and workflow of [DeepH](https://github.com/kYangLi/DeepH-pack-docs)**:
 
 [Yang Li, Yanzhen Wang, Boheng Zhao, *et al*. DeepH-pack: A general-purpose neural network package for deep-learning electronic structure calculations. arXiv:2601.02938 (2026)](https://arxiv.org/abs/2601.02938)
 
@@ -47,7 +67,7 @@ For more details, see the full [GPL-3.0 license](https://www.gnu.org/licenses/gp
 
 ### FHI-aims is not distributed with AimsPy
 
-AimsPy loads a *patched* `libaims.so` at runtime, but **FHI-aims itself is not distributed with AimsPy** and remains under its own licence agreement with the aims team. Users must obtain the FHI-aims source code independently from the [aims team](https://aims-code.rg.mpg.de/). The bundled patch is an open-source diff against a clean FHI-aims checkout; applying it does not change FHI-aims' licensing for the underlying code.
+AimsPy loads a *patched* `libaims.so` at runtime, but **FHI-aims itself is not distributed with AimsPy** and remains under its own licence agreement with the aims team. Users must obtain the FHI-aims source code independently from the [aims team](https://fhi-aims.org/get-the-code-menu/get-the-code). The bundled patch is an open-source diff against a clean FHI-aims checkout; applying it does not change FHI-aims' licensing for the underlying code.
 
 ## Acknowledgements
 
@@ -79,7 +99,7 @@ AimsPy builds upon the work of many open-source projects in the scientific Pytho
 - **mpi4py / MPI** for high-performance parallel computing
 - **Click** for the command-line interface framework
 - **Sphinx / sphinx-book-theme / MyST-NB** for the documentation infrastructure
-- **FHI-aims** — the electronic structure code that AimsPy drives, developed by the [aims team](https://aims-code.rg.mpg.de/)
+- **FHI-aims** — the electronic structure code that AimsPy drives, developed by the [aims team](https://www.fhi-aims.org/)
 - And many other essential libraries
 
 ### How to Acknowledge

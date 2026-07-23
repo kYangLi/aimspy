@@ -6,7 +6,7 @@ import json
 import numpy as np
 import pytest
 
-from aimspy.interface.deeph import DeepHData
+from aimspy import DeepHData
 from aimspy.interface.deeph.data import (
     _build_elements_orbital_map,
     _compute_n_basis,

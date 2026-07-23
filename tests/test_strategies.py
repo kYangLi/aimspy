@@ -95,7 +95,7 @@ def run_children():
     strategy = sys.argv[2] if len(sys.argv) > 2 else "baseline"
     from mpi4py import MPI
     from aimspy import Calculator, CalculatorConfig, Strategy
-    from aimspy.interface.deeph import DeepHData
+    from aimspy import DeepHData
 
     comm = MPI.COMM_WORLD
     rank = comm.rank

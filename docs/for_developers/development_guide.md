@@ -28,7 +28,7 @@ AimsPy is deliberately conservative about where state lives:
 
 AimsPy's canonical in-memory representation is the **`AimspyMatrix` block-sparse format**, whose conventions (sign, parity, units, Hermitian partners) are documented in [Key Concepts](../key_concepts.md#aimspymatrix-block-sparse-format). All developers should read that section before touching `matrix.py` or `interface/deeph/`.
 
-The DeepH on-disk format is shared with [DeepH-dock](https://github.com/kYangLi/DeepH-dock); its full field-level specification is in the [DeepH-dock Key Concepts](https://deeph-dock.readthedocs.io/en/latest/key_concepts.html) page.
+The DeepH on-disk format is shared with [DeepH-dock](https://github.com/kYangLi/DeepH-dock); its full field-level specification is in the [DeepH-dock Key Concepts](https://docs.deeph-pack.com/deeph-dock/en/latest/key_concepts.html) page.
 
 ## Extending AimsPy
 
@@ -36,7 +36,7 @@ After forking the source code by following the [Fork and Pull Request Process](.
 
 ### Adding a New Callback
 
-Adding a new callback type requires touching **four well-defined places** (documented at the top of `aimspy/_callbacks/base.py`):
+Adding a new callback type requires touching the following well-defined places (documented at the top of `aimspy/_callbacks/base.py`):
 
 1. **Fortran patch** (`aimspy/_patches/aimspy-patch_vX.Y.Z.diff`) — add the abstract callback interface in `callback.f90`, the `aimspy_register_<name>_callback` subroutine in `register.f90`, and the trigger point in `initialize_scf.f90`. Bump the patch version and update the `Makefile` `PATCH_VERSION` line.
 
@@ -119,7 +119,7 @@ No MPI, no `libaims`. Cover `AimspyStructure` derived properties, `DeepHData` I/
 
 ### Integration tests — `tests/test_*.py`
 
-Require `AIMSPY_TEST_AIMS_LIBPATH` pointing at a patched `libaims.so`, run under `mpiexec` (default 8 ranks). The suite covers baseline SCF, DeepH export, warmstart, overlap capture, regression (50+ checks), and the four `Strategy` variants.
+Require `AIMSPY_TEST_AIMS_LIBPATH` pointing at a patched `libaims.so`, run under `mpiexec` (default 8 ranks). The suite covers baseline SCF, DeepH export, warmstart, overlap capture, regression (50+ checks), and all `Strategy` variants.
 
 > **Important**: FHI-aims is a global Fortran singleton — one `init`/`finalize` per process. `test_strategies.py` therefore runs each strategy in a **separate MPI invocation via `subprocess`**, with the controlling Python process dispatching and aggregating results. New per-strategy tests should follow this pattern.
 

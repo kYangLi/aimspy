@@ -18,15 +18,17 @@
 *For seamless integration with [DeepX/DeepH-pack](https://github.com/kYangLi/DeepH-pack-docs)*
 </div>
 
-*AimsPy* drives [FHI-aims](https://aims-code.rg.mpg.de/) DFT calculations directly from Python — no subprocess, no file-staged I/O on hot paths — by loading a patched `libaims.so` via `ctypes` and exchanging matrices in memory through a callback framework. It is designed as the FHI-aims binding layer of the [DeepH](https://github.com/kYangLi/DeepH-pack-docs) ecosystem, and the central enabler of **warmstart SCF**: injecting an externally-predicted Hamiltonian (e.g. from a DeepH-trained model) as the initial guess so that a single SCF iteration reproduces the converged result.
+*AimsPy* drives [FHI-aims](https://www.fhi-aims.org/) DFT calculations directly from Python — no subprocess, no file-staged I/O on hot paths — by loading a patched `libaims.so` via `ctypes` and exchanging matrices in memory through a callback framework. It is designed as the FHI-aims binding layer of the [DeepH](https://github.com/kYangLi/DeepH-pack-docs) ecosystem, and the central enabler of **warmstart SCF**: injecting an externally-predicted Hamiltonian (e.g. from a DeepH-trained model) as the initial guess so that SCF converges rapidly in several iterations.
 
-At the core of *AimsPy* is **a unified in-memory representation of block-sparse real-space matrices** — `AimspyMatrix` — that round-trips between FHI-aims' internal CSR layout and the DeepH on-disk format with documented sign/parity conventions, making it equally useful as a standalone post-processing interface for FHI-aims users.
+At the core of *AimsPy* is **a unified in-memory representation of block-sparse real-space matrices** — `AimspyMatrix` — that round-trips between FHI-aims' internal CSR layout and the DeepH format data with documented sign/parity conventions, making it equally useful as a standalone post-processing interface for FHI-aims users.
 
-For the most comprehensive usage documentation, please visit [https://aimspy.readthedocs.io](https://aimspy.readthedocs.io).
+For the most comprehensive usage documentation, please visit [https://docs.deeph-pack.com/aimspy/en/latest/](https://docs.deeph-pack.com/aimspy/en/latest/).
 
 ---
 
 - [Core Features](#core-features)
+- [Runtime Environment](#runtime-environment)
+  - [Install Intel OneAPI Toolchain](#install-intel-oneapi-toolchain)
 - [Quick Start](#quick-start)
   - [Installation](#installation)
   - [Basic Usage](#basic-usage)
@@ -34,19 +36,42 @@ For the most comprehensive usage documentation, please visit [https://aimspy.rea
 - [Application Scenarios](#application-scenarios)
 - [Contributing](#contributing)
 - [License](#license)
-- [Support & Contact](#support--contact)
+- [Support \& Contact](#support--contact)
 
 ## Core Features
 
-- **In-Memory SCF:** Load `libaims.so` once and drive the full SCF cycle from Python via `ctypes`. No subprocess, no file-staged I/O on the hot path — Hamiltonian, overlap, energy, and forces are exchanged as in-memory arrays through a callback framework.
+- **Bundled FHI-aims Patch:** Patch FHI-aims with a single command — `aimspy patch` applies, uninstalls, and lists versioned patches against an FHI-aims source tree. No manual code editing required.
 
-- **Warmstart:** Inject an external Hamiltonian (e.g. a DeepH prediction) as the initial guess and converge SCF in a single iteration. Four strategies — `REPLACE`, `ADD`, `SCALE`, `CUSTOM` — cover warmstart, perturbation, scaling, and arbitrary user transforms.
+- **In-Memory SCF:** Run FHI-aims SCF calculations directly from Python — no subprocess, no file I/O on the critical path. Hamiltonian, overlap, energy, and forces are returned as native Python objects, ready for analysis or downstream processing.
 
-- **Pluggable Matrix Sources:** The `ExternalMatrixSource` protocol accepts any object with `to_aimspy(structure) -> AimspyMatrix`. A reference `DeepHData` adapter ships built-in; adding a new format is a single subpackage under `aimspy/interface/`.
+- **DeepH Export:** Export converged Hamiltonian, overlap, and free-atom initial Hamiltonian to the DeepH on-disk format in a single pipeline — ideal for generating training data for DeepH models.
 
-- **MPI-Transparent:** Works under `mpiexec`; rank-0 vs. all-rank APIs are documented per property. INFO/WARNING messages are emitted on rank 0 only; ERROR on all ranks for debugging.
+- **Warmstart:** Provide a pre-trained Hamiltonian (e.g. from a DeepH model) as the initial guess, and SCF converges in several iterations instead of the usual 10+. Strategies — `REPLACE`, `ADD`, `SCALE`, `CUSTOM` — cover warmstart, correction (Delta-prediction), scaling, and custom transforms.
 
-- **Bundled FHI-aims Patch:** `aimspy patch` applies, uninstalls, and lists versioned diffs against an FHI-aims source tree — no manual editing. The patch exposes five Fortran callback hook points and the warmstart short-circuit inside `initialize_scf.f90`.
+- **Pluggable Matrix Sources:** Use any Hamiltonian source for warmstart — the built-in `DeepHData` adapter reads DeepH-format data directly, and adding a new format is just one subpackage under `aimspy/interface/`.
+
+
+## Runtime Environment
+
+AimsPy requires a patched `libaims.so` built with an MPI-enabled Fortran compiler and a BLAS/LAPACK math library. The tested configuration uses Intel OneAPI.
+
+### Install Intel OneAPI Toolchain
+
+Download from the [Intel OneAPI Toolkit page](https://www.intel.com/content/www/us/en/developer/tools/oneapi/oneapi-toolkit-download.html).
+
+Required components:
+- Intel Fortran compiler (`ifx` / `mpiifx`)
+- Intel C/C++ compiler (`icx` / `icpx`)
+- Intel MKL (includes BLAS, LAPACK, ScaLAPACK, BLACS)
+- Intel MPI (`mpiifx` is the MPI Fortran wrapper)
+
+After installation, set up the environment:
+
+```bash
+source /opt/intel/oneapi/setvars.sh
+```
+
+> **Note**: Other MPI distributions and math libraries (e.g. OpenMPI + OpenBLAS) can also be used, as long as they support building FHI-aims and `mpi4py`. The key requirement is that `mpi4py` and `libaims.so` use the **same MPI backend** — see [Installation & Setup](https://docs.deeph-pack.com/aimspy/en/latest/installation_and_setup.html) for details.
 
 ## Quick Start
 
@@ -81,22 +106,34 @@ aimspy patch --uninstall /path/to/FHI-aims # reverse the detected patch
 aimspy patch --list                        # show bundled versions
 ```
 
-**Prerequisites:** a clean FHI-aims checkout on the patch's base branch (currently `dev`). FHI-aims itself is **not** distributed with AimsPy — users must obtain its source code independently from the [aims team](https://aims-code.rg.mpg.de/).
+**Prerequisites:** a clean FHI-aims checkout on the patch's base branch. FHI-aims itself is **not** distributed with AimsPy — users must obtain its source code independently from the [aims team](https://fhi-aims.org/get-the-code-menu/get-the-code).
 
-For detailed setup (uv environment, building `libaims.so`, environment variables), see [Installation & Setup](https://aimspy.readthedocs.io/en/latest/installation_and_setup.html).
+> **Note**: The current patch supports FHI-aims versions **250822** and **250822_1** only. Other versions are not compatible. Patches for additional FHI-aims versions will be released in the future.
+
+> **Note**: AimsPy loads `libaims.so` via `ctypes` at runtime, so FHI-aims must be built as a **shared library** (`-DBUILD_SHARED_LIBS=ON`). For detailed setup (uv environment, building `libaims.so`, environment variables), see [Installation & Setup](https://docs.deeph-pack.com/aimspy/en/latest/installation_and_setup.html) for full build instructions.
 
 ### Basic Usage
 
-Baseline SCF on a prepared `work_dir` (containing `control.in` + `geometry.in`):
+Three core workflows:
+
+1. **Baseline SCF** — run a standard FHI-aims SCF calculation and extract results as Python objects.
+2. **DeepH export** — run SCF and export matrices to the DeepH on-disk format for training data generation.
+3. **DeepH warmstart** — inject a pre-trained Hamiltonian and converge SCF in several iterations.
+
+**Baseline SCF** on a prepared `work_dir` (containing FHI-aims required input files `control.in` + `geometry.in`):
 
 ```python
 from mpi4py import MPI
 from aimspy import Calculator, CalculatorConfig
 
+comm = MPI.COMM_WORLD
+rank = comm.rank
+
 config = CalculatorConfig(lib_path="/path/to/libaims.so")
 with Calculator(config) as calc:
-    calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
-    H = calc.hamiltonian     # AimspyMatrix (block-sparse, Hartree)
+    calc.do(comm=comm, work_dir="./MoS2")
+    if rank == 0:
+      H = calc.hamiltonian     # AimspyMatrix (block-sparse, Hartree, rank-0 only)
     E = calc.energy          # float (Hartree)
 ```
 
@@ -106,27 +143,84 @@ Run with MPI:
 mpiexec -np 8 python script.py
 ```
 
-DeepH warmstart (1-iteration SCF):
+> **Note**: Matrix extraction and injection (e.g. warmstart, overlap/H0
+> capture) require a **periodic system** with `use_local_index = .false.`
+> in `control.in`. Forward SCF works with any system type. For isolated
+> molecules, use a large periodic cell with vacuum — see the
+> [examples](https://github.com/kYangLi/aimspy/tree/main/examples).
+
+**DeepH export** — export converged matrices to DeepH format:
+
+```python
+from mpi4py import MPI
+from aimspy import Calculator, CalculatorConfig
+from aimspy import DeepHData
+
+comm = MPI.COMM_WORLD
+rank = comm.rank
+
+config = CalculatorConfig(
+    lib_path="/path/to/libaims.so",
+    capture_initial_hamiltonian=True,  # capture free-atom H0
+)
+with Calculator(config) as calc:
+    calc.do(comm=comm, work_dir="./MoS2")
+
+    # Export H, S, H0 to DeepH on-disk format
+    if rank == 0:
+      dd = DeepHData.from_aimspy(
+          calc.structure,
+          hamiltonian=calc.hamiltonian,
+          overlap=calc.overlap,
+          initial_hamiltonian=calc.initial_hamiltonian,
+      )
+      dd.save("deeph_out/")
+```
+
+> **Note**: For the DeepH on-disk data format specification (POSCAR, info.json,
+> .h5 files), see [DeepH-dock Key Concepts](https://docs.deeph-pack.com/deeph-dock/en/latest/key_concepts.html).
+
+**DeepH warmstart** — inject a pre-trained Hamiltonian as the initial guess:
 
 ```python
 from mpi4py import MPI
 from aimspy import Calculator, CalculatorConfig, Strategy
-from aimspy.interface.deeph import DeepHData
+from aimspy import DeepHData
 
-data = DeepHData.from_directory("deeph_warm/")
+data = DeepHData.from_directory("deeph_out/")
 config = CalculatorConfig(lib_path="/path/to/libaims.so")
 calc = Calculator(config)
 calc.modify_init_ham(source=data, strategy=Strategy.REPLACE)
 calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
 ```
 
-For complete examples — warmstart with deferred source, DeepH-format export, overlap capture, and error recovery — see [Basic Usage](https://aimspy.readthedocs.io/en/latest/basic_usage.html).
+For more — deferred source, overlap capture, error recovery, and the full API — see [Basic Usage](https://docs.deeph-pack.com/aimspy/en/latest/basic_usage.html) and [API Reference](https://docs.deeph-pack.com/aimspy/en/latest/api_reference.html).
 
 ## Citation
 
 *Any and all use of this software, in whole or in part, should clearly acknowledge and link to this repository.*
 
-If you use this code in your academic work, please cite **the complete package featuring the latest implementation, methodology, and workflow of [DeepH](https://github.com/kYangLi/DeepH-pack-docs)**:
+Since AimsPy drives FHI-aims calculations, please cite the **FHI-aims** original paper:
+
+[Volker Blum, Ralf Gehrke, Felix Hanke, Paula Havu, Ville Havu, Xinguo Ren, Karsten Reuter, Matthias Scheffler. Ab initio molecular simulations with numeric atom-centered orbitals. Computer Physics Communications 180(11), 2175–2196 (2009)](https://doi.org/10.1016/j.cpc.2009.06.022)
+
+```bibtex
+@article{BLUM20092175,
+    title = {Ab initio molecular simulations with numeric atom-centered orbitals},
+    journal = {Computer Physics Communications},
+    volume = {180},
+    number = {11},
+    pages = {2175--2196},
+    year = {2009},
+    issn = {0010-4655},
+    doi = {https://doi.org/10.1016/j.cpc.2009.06.022},
+    url = {https://www.sciencedirect.com/science/article/pii/S0010465509002033},
+    author = {Volker Blum and Ralf Gehrke and Felix Hanke and Paula Havu and Ville Havu and Xinguo Ren and Karsten Reuter and Matthias Scheffler},
+    keywords = {molecular simulations, Density-functional theory, Atom-centered basis functions, Hartree--Fock, MP2, O(N) DFT, self-energy}
+}
+```
+
+If you use this code in your academic work, please also cite **the complete package featuring the latest implementation, methodology, and workflow of [DeepH](https://github.com/kYangLi/DeepH-pack-docs)**:
 
 [Yang Li, Yanzhen Wang, Boheng Zhao, *et al*. DeepH-pack: A general-purpose neural network package for deep-learning electronic structure calculations. arXiv:2601.02938 (2026)](https://arxiv.org/abs/2601.02938)
 
@@ -141,9 +235,9 @@ If you use this code in your academic work, please cite **the complete package f
 
 ## Application Scenarios
 
-- **DeepH Warmstart:** Inject a pre-trained DeepH Hamiltonian as the initial guess and converge SCF in a single iteration, enabling rapid downstream property evaluation.
-- **FHI-aims Post-Processing:** Extract converged Hamiltonian, overlap, and free-atom `H_init` matrices in the standard `AimspyMatrix` format for analysis or conversion.
 - **DeepH Training Data Generation:** Run baseline SCF and export to the DeepH on-disk format (`POSCAR` + `info.json` + `.h5`) in a single pipeline.
+- **DeepH Warmstart:** Inject a pre-trained DeepH Hamiltonian as the initial guess and converge SCF in several iterations, enabling rapid downstream property evaluation.
+- **FHI-aims Post-Processing:** Extract converged Hamiltonian, overlap, and free-atom `H_init` matrices in the standard `AimspyMatrix` format for analysis or conversion.
 - **Method Development:** Prototype new initial-guess strategies via the `Strategy.CUSTOM` hook, or plug in alternative DFT backends by implementing the `ExternalMatrixSource` protocol.
 
 ## Contributing
@@ -153,10 +247,10 @@ We welcome contributions from the community! AimsPy is built with a layered arch
 Common contribution targets:
 
 - **New external matrix sources** — implement the `ExternalMatrixSource` protocol in a new subpackage under `aimspy/interface/<your_format>/`.
-- **New callback hook points** — follow the four-place extension contract (Fortran patch + `callback_types.py` + `prototypes.py` + `registry.py`).
+- **New callback hook points** — follow the extension contract documented in the [Development Guide](https://docs.deeph-pack.com/aimspy/en/latest/for_developers/development_guide.html).
 - **New modification strategies** — extend the `Strategy` enum and the `_apply_strategy` dispatcher.
 
-For the complete development workflow, code style, testing requirements, and pull request process, see the [Development Guide](https://aimspy.readthedocs.io/en/latest/for_developers/development_guide.html) and [Collaboration Guide](https://aimspy.readthedocs.io/en/latest/for_developers/collaboration_guide.html).
+For the complete development workflow, code style, testing requirements, and pull request process, see the [Development Guide](https://docs.deeph-pack.com/aimspy/en/latest/for_developers/development_guide.html) and [Collaboration Guide](https://docs.deeph-pack.com/aimspy/en/latest/for_developers/collaboration_guide.html).
 
 ```bash
 make install    # create .venv, install editable with dev deps
@@ -173,7 +267,7 @@ FHI-aims itself is **not** distributed with AimsPy and remains under its own lic
 
 ## Support & Contact
 
-- 📖 **Documentation**: [https://aimspy.readthedocs.io](https://aimspy.readthedocs.io)
+- 📖 **Documentation**: [https://docs.deeph-pack.com/aimspy/en/latest/](https://docs.deeph-pack.com/aimspy/en/latest/)
 - 🐛 **Issue Reporting**: [GitHub Issues](https://github.com/kYangLi/aimspy/issues)
 
 ---

@@ -4,14 +4,14 @@ This section describes the core architecture and data formats used by AimsPy. Un
 
 ## Overview
 
-AimsPy drives [FHI-aims](https://aims-code.rg.mpg.de/) DFT calculations directly from Python by loading a *patched* `libaims.so` via `ctypes`. There is no subprocess and no file-staged I/O on the hot path — Hamiltonian, overlap, energy, and forces are exchanged as in-memory arrays through a callback framework exposed by the bundled FHI-aims patch.
+AimsPy drives [FHI-aims](https://www.fhi-aims.org/) DFT calculations directly from Python by loading a *patched* `libaims.so` via `ctypes`. There is no subprocess and no file-staged I/O on hot paths — Hamiltonian, overlap, energy, and forces are exchanged as in-memory arrays through a callback framework exposed by the bundled FHI-aims patch.
 
 The package is organised in three layers:
 
 | Layer | Purpose | Public? |
 |-------|---------|---------|
 | `aimspy.calculator`, `aimspy.matrix`, `aimspy.structure`, `aimspy.interface.deeph` | User-facing API | Yes |
-| `aimspy._callbacks` | Callback framework (`CallbackManager`, 5 hook-point specs) | No |
+| `aimspy._callbacks` | Callback framework (`CallbackManager`, hook-point specs) | No |
 | `aimspy._binding`, `aimspy._patches` | ctypes binding to `libaims.so`; versioned FHI-aims diffs | No |
 
 The central user-facing class is `Calculator`, whose lifecycle is governed by the `CalcState` state machine.
@@ -31,8 +31,8 @@ The central user-facing class is `Calculator`, whose lifecycle is governed by th
 
 ```
 UNINIT ──init()──> INITED ──calc()──> [RUNNING] ──> DONE
-                     │                                   │
-                     └──close()──────────────────────────┘
+                     │                                │
+                     └──close()───────────────────────┘
                                                 │
               close()/force_close() ──────────> FINALIZED
    (any state, on error) ──> FAILED ──force_close()──> FINALIZED
@@ -43,27 +43,37 @@ UNINIT ──init()──> INITED ──calc()──> [RUNNING] ──> DONE
 | `UNINIT` | Freshly constructed | `init` / `do` / `force_close` |
 | `INITED` | `aimspy_init` done; callbacks registered; `info`/`structure` readable | `calc` / `close` |
 | `RUNNING` | Transient inside `calc()` while `aimspy_run` is executing | `DONE` / `FAILED` |
-| `DONE` | SCF converged; `hamiltonian`/`energy`/`forces` readable | `close` |
+| `DONE` | SCF converged; `hamiltonian`/`forces` readable | `close` |
 | `FAILED` | Operation aborted; Fortran runtime in unknown state | `force_close` only |
 | `FINALIZED` | `aimspy_finalize` called; terminal | — |
 
 State transitions are guarded — calling `calc()` from `UNINIT`, or `close()` from `RUNNING`, raises `AimspyStateError`. Use `force_close()` for safe recovery from any state.
 
+> **Note**: `energy` is also accessible in the `RUNNING` state (e.g. from
+> inside a callback during pre-SCF), but the value may be uninitialized
+> before the first SCF iteration completes.
+
 > **Thread safety**: `Calculator` is **not thread-safe**. FHI-aims uses `chdir(2)` (process-global) internally, so concurrent `Calculator` operations in the same process will race. The typical MPI usage is one rank = one process.
 
-## The 5 Callback Hook Points
+## Callback Framework
 
-The bundled FHI-aims patch inserts five trigger points inside `src/initialize_scf.f90`, after `reshape_matrices` and before the initial diagonalisation. They fire in this order:
+The bundled FHI-aims patch inserts trigger points inside `src/initialize_scf.f90`, after `reshape_matrices` and before the initial diagonalisation. The available callbacks are:
 
-| # | Callback | Register symbol | Purpose |
-|---|----------|-----------------|---------|
-| 1 | `get_descr` | `aimspy_register_get_descr_callback` | Fill the `TAimspyCsrMxDescr` struct (CSR layout) |
-| 2 | `export_ovlp` | `aimspy_register_export_ovlp_callback` | Export the overlap matrix |
-| 3 | `export_h0` | `aimspy_register_export_h0_callback` | Export the free-atom initial Hamiltonian `H_init` |
-| 4 | `python_func` | `aimspy_register_python_callback` | Generic Python hook (deferred source generation) |
-| 5 | `modify_h0` | `aimspy_register_modify_h0_callback` | Inject the modified `H_init` back into FHI-aims |
+| Callback | Purpose |
+|----------|---------|
+| `get_descr` | Capture the CSR sparse-storage layout |
+| `export_ovlp` | Export the overlap matrix |
+| `export_h0` | Export the free-atom initial Hamiltonian (H_init) |
+| `python_func` | Generic Python hook (deferred source generation) |
+| `modify_h0` | Inject the modified H_init back into FHI-aims |
 
-When `modify_h0` is registered, the patch **short-circuits** the standard initial diagonalisation: it calls `advance_KS_solution` directly on the injected Hamiltonian and sets `restart_zero_iteration=.true.`, which is what enables 1-iteration warmstart.
+When `modify_h0` is registered, the patch **short-circuits** the standard initial diagonalisation: it calls `advance_KS_solution` directly on the injected Hamiltonian and sets `restart_zero_iteration=.true.`, which is what enables warmstart in several iterations.
+
+> **Note**: Matrix extraction and injection (overlap, Hamiltonian, H_init)
+> require a **periodic system** with `use_local_index = .false.`. Forward
+> SCF calculations (without matrix extraction/injection) work with any
+> system type. For isolated molecules, use a sufficiently large periodic
+> cell with vacuum.
 
 ### How callbacks are wired
 
@@ -84,12 +94,12 @@ A Python exception raised inside a callback never crashes Fortran. The `Callback
 
 ## Hamiltonian Modification Strategies
 
-`Calculator.modify_init_ham(source=..., strategy=...)` configures how the live `H_init` buffer is mutated before SCF starts. Four strategies ship built-in, dispatched by the pure function `_apply_strategy`:
+`Calculator.modify_init_ham(source=..., strategy=...)` configures how the live `H_init` buffer is mutated before SCF starts. The built-in strategies, dispatched by the pure function `_apply_strategy`:
 
 | Strategy | Behaviour | Required argument | Typical use |
 |----------|-----------|-------------------|-------------|
 | `REPLACE` | Clear and copy external blocks into the live `H_init` | `source=` | Warmstart with a DeepH prediction |
-| `ADD` | Accumulate external blocks on top of the live `H_init` | `source=` | Perturbation / hybrid construction |
+| `ADD` | Add external blocks on top of the live `H_init` | `source=` | Correction (Delta-prediction): add predicted H − H₀ to H₀ to recover H |
 | `SCALE` | Multiply the live `H_init` by a constant factor | `factor=` (float) | Scaling experiments |
 | `CUSTOM` | Call `custom_fn(live, external, structure, aux)` to mutate the live matrix in place | `custom_fn=` (callable) | Arbitrary transforms |
 
@@ -106,7 +116,7 @@ A Python exception raised inside a callback never crashes Fortran. The `Callback
 calc.modify_init_ham(source=data, strategy=Strategy.REPLACE)
 
 # Deferred
-@calc.modify_init_ham(strategy=Strategy.REPLACE, option={"path": "deeph_warm/"})
+@calc.modify_init_ham(strategy=Strategy.REPLACE, option={"path": "deeph_out/"})
 def gen_source(calculator, option):
     return DeepHData.from_directory(option["path"])
 ```
@@ -123,18 +133,39 @@ class ExternalMatrixSource(Protocol):
     def to_aimspy(self, structure: AimspyStructure) -> AimspyMatrix: ...
 ```
 
-The reference implementation is `DeepHData` (`aimspy.interface.deeph`), which reads the DeepH on-disk format (`POSCAR` + `info.json` + `.h5`) and converts to `AimspyMatrix`. Adding a new external format is a single subpackage under `aimspy/interface/<format>/` with a class satisfying this protocol — no other code changes are required.
+The reference implementation is `DeepHData` (importable from `aimspy` directly), which reads the DeepH on-disk format (`POSCAR` + `info.json` + `.h5`) and converts to `AimspyMatrix`. Adding a new external format is a single subpackage under `aimspy/interface/<format>/` with a class satisfying this protocol — no other code changes are required.
 
 ## AimspyMatrix Block-Sparse Format
 
-The `AimspyMatrix` dataclass is AimsPy's canonical in-memory representation:
+`AimspyMatrix` is AimsPy's canonical in-memory representation of block-sparse
+real-space matrices. It holds a dict mapping atom-pair keys to dense numpy
+blocks:
 
 ```python
-@dataclass
-class AimspyMatrix:
-    blocks: dict[tuple[int, int, int, int, int], np.ndarray]  # (R1,R2,R3,i,j) -> (n_i, n_j)
-    n_spin: int = 1
+from aimspy import AimspyMatrix
+import numpy as np
+
+# Direct construction
+matrix = AimspyMatrix(
+    blocks={
+        (0, 0, 0, 0, 0): np.array([[1.0, 0.5], [0.5, 1.0]]),  # R=0, atom 0→0
+        (1, 0, 0, 0, 1): np.array([[0.1]]),                     # R=(1,0,0), atom 0→1
+    },
+    n_spin=1,
+)
+
+# Access
+block = matrix.blocks[(0, 0, 0, 0, 0)]  # ndarray, shape (2, 2)
+print(matrix.n_pairs)                    # 2
 ```
+
+Each key is a 5-tuple `(R1, R2, R3, i_atom, j_atom)`:
+
+- `R1, R2, R3` — lattice vector components (integers), following `R_aimspy = -R_aims = R_deeph`
+- `i_atom, j_atom` — 0-based atom indices in aims native order
+
+Each value is an `np.ndarray` of shape `(n_orb_i, n_orb_j)`, dtype `float64`,
+where `n_orb_i` / `n_orb_j` are the number of basis functions on atom `i` / `j`.
 
 ### Conventions
 
@@ -144,23 +175,68 @@ class AimspyMatrix:
 | Atom indices | aims native order (no reordering) |
 | Orbital order | aims native basis order (no reordering) |
 | Parity | wiki/DeepH convention (`phase_i * phase_j` already applied) |
-| Units | Hartree |
+| Units | Hartree (Hamiltonian), dimensionless (overlap) |
 | Hermitian partners | **both** `(R,i,j)` and `(-R,j,i)` are stored |
 
-The parity convention is implemented in `AimspyStructure.phase_factor`: `-1` if `m > 0 and m odd`, else `+1`. It is **self-inverse** (`phase² = 1`), so applying it once converts aims ↔ aimspy and applying it again undoes the conversion.
+### Phase factor
 
-### CSR conversion
+The parity convention is implemented in `AimspyStructure.phase_factor`:
 
-`AimspyMatrix` round-trips with FHI-aims' internal CSR layout via:
+```python
+phase_factor = np.where((basis_m > 0) & (basis_m % 2 == 1), -1, 1).astype(np.int32)
+```
 
-- `AimspyMatrix.from_aims_csr(h0, csr_descr, structure)` — walks the CSR triplanes, applies `phase_i * phase_j`, sign-flips `R`, and stores both Hermitian partners.
-- `AimspyMatrix.to_aims_csr(csr_descr, structure)` — reverse walk, with Hermitian fallback (if `(R,i,j)` is missing, tries `(-R,j,i)` and transposes). Undoes parity. Returns a `(n_spin, n_ham_size)` C-contiguous array ready for `ctypes.memmove` into the Fortran buffer.
+It is **self-inverse** (`phase² = 1`), so applying it once converts aims ↔ aimspy
+and applying it again undoes the conversion.
 
-> **Note**: both converters are spinless — they read/write channel 0 only. Spin-polarised support is on the roadmap.
+### Construction
+
+Three ways to obtain an `AimspyMatrix`:
+
+```python
+# 1. Direct (offline, for testing or custom data)
+matrix = AimspyMatrix(blocks={...}, n_spin=1)
+
+# 2. From FHI-aims CSR (after calc.do(), rank 0 only)
+H = calc.hamiltonian  # AimspyMatrix
+
+# 3. From DeepH on-disk format
+from aimspy import DeepHData
+data = DeepHData.from_directory("deeph_out/")
+H = data.to_aimspy(calc.structure)  # AimspyMatrix
+```
+
+Conversions require an `AimspyStructure` (provides atom/orbital info and derived
+properties like `phase_factor`, `orbit_per_atom`, `atom_permutation`) and a
+`CsrMatrixDescriptor` (FHI-aims' CSR sparse layout — see
+[API Reference](https://docs.deeph-pack.com/aimspy/en/latest/api_reference.html) for field details).
+
+### Conversion
+
+- **To aims CSR**: `matrix.to_aims_csr(csr_descr, structure)` returns a
+  `(n_spin, n_ham_size)` C-contiguous array, ready for `ctypes.memmove` into
+  the Fortran buffer. Hermitian fallback: if `(R,i,j)` is missing, `(-R,j,i)`
+  is used with transposition.
+- **To DeepH format**: `DeepHData.from_aimspy(structure, hamiltonian=matrix, ...)`
+  handles atom reordering (aims → POSCAR) and unit conversion (Hartree → eV).
+
+### Accuracy
+
+| Round-trip | max|diff| |
+|------------|----------|
+| aims → aimspy → aims | 5.55e-17 Hartree (machine precision) |
+| aimspy → DeepH → aimspy → aims | 1.78e-15 Hartree |
+
+### Limitations
+
+- **Spinless only**: converters read/write spin channel 0; `n_spin=2` leaves
+  channel 1 as zero. Spin-polarised support is on the roadmap.
+- **Periodic only**: matrix extraction/injection requires `use_local_index = .false.`
+  (see [Troubleshooting](./troubleshooting.md)).
 
 ## DeepH Data Format
 
-`DeepHData` reads and writes the standard DeepH on-disk format used throughout the DeepH ecosystem. The format is shared with [DeepH-dock](https://github.com/kYangLi/DeepH-dock) — for the full field-level specification, see the [DeepH-dock Key Concepts](https://deeph-dock.readthedocs.io/en/latest/key_concepts.html) page. A summary:
+`DeepHData` reads and writes the standard DeepH on-disk format used throughout the DeepH ecosystem. The format is shared with [DeepH-dock](https://github.com/kYangLi/DeepH-dock) — for the full field-level specification, see the [DeepH-dock Key Concepts](https://docs.deeph-pack.com/deeph-dock/en/latest/key_concepts.html) page. A summary:
 
 ```
 some_directory/
@@ -187,14 +263,14 @@ Each `.h5` file stores four datasets: `atom_pairs` `(N,5)`, `chunk_boundaries` `
 
 The bundled patch (`aimspy/_patches/aimspy-patch_v0.1.0.diff`, ~1100 lines) does three things:
 
-1. **Adds `src/aimspy_api/`** with five Fortran modules:
+1. **Adds `src/aimspy_api/`** with Fortran modules:
    - `callback.f90` — `TAimspyCsrMxDescr` (bind(C) struct), `TAimspyCallback` handle type, abstract callback interfaces.
    - `api_bank.f90` — module-level `save` arrays (`c_hamiltonian`, `c_overlap`), `aimspy_energy`, `aimspy_forces` accessors.
    - `info.f90` — `TAimspyInfo` bind(C) struct + `aimspy_get_info` populating a `save` buffer.
-   - `register.f90` — the five `aimspy_register_*_callback` bind(C) subroutines.
+   - `register.f90` — the `aimspy_register_*_callback` bind(C) subroutines.
    - `main.f90` — `aimspy_init` / `aimspy_run` / `aimspy_finalize` / `aimspy_all` lifecycle entry points.
 
-2. **Hooks into `src/initialize_scf.f90`** — the five trigger points after `reshape_matrices`, and the warmstart short-circuit calling `advance_KS_solution` on the injected Hamiltonian with `restart_zero_iteration=.true.`.
+2. **Hooks into `src/initialize_scf.f90`** — trigger points after `reshape_matrices`, and the warmstart short-circuit calling `advance_KS_solution` on the injected Hamiltonian with `restart_zero_iteration=.true.`.
 
 3. **Exposes `pbc_lists.f90` arrays** — adds `target` attributes to `index_hamiltonian` / `column_index_hamiltonian` so they can be exposed via `c_loc`.
 

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from aimspy import Calculator, CalculatorConfig
 from mpi4py import MPI
-from aimspy.interface.deeph import DeepHData
+from aimspy import DeepHData
 
 comm = MPI.COMM_WORLD
 rank = comm.rank

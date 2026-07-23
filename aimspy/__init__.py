@@ -29,7 +29,7 @@ Primary entry points:
 
 Interface layer (external format adapters):
 
-  - :mod:`aimspy.interface.deeph` — DeepH format reader + converter
+  - :class:`DeepHData` (also at :mod:`aimspy.interface.deeph`) — DeepH format reader + converter
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from .calculator import (
 )
 from ._callbacks.registry import CallbackName
 from .interface import ExternalMatrixSource
+from .interface.deeph import DeepHData
 from .data import (
     AimspyInfo,
     CsrMatrixDescriptor,
@@ -82,6 +83,7 @@ __all__ = [
     "Calculator",
     "CalculatorConfig",
     "CsrMatrixDescriptor",
+    "DeepHData",
     "EV_TO_HARTREE",
     "ExternalMatrixSource",
     "get_rs_hamiltonian",

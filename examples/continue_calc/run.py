@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 from aimspy import Calculator, CalculatorConfig, Strategy
-from aimspy.interface.deeph import DeepHData
+from aimspy import DeepHData
 from mpi4py import MPI
 
 comm = MPI.COMM_WORLD
