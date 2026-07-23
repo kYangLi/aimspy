@@ -51,6 +51,8 @@ master_doc = "index"
 
 autodoc_typehints = "none"
 
+autodoc_mock_imports = ["mpi4py", "h5py", "numpy", "click"]
+
 
 # -- Options for HTML output -------------------------------------------------
 
