@@ -220,13 +220,6 @@ properties like `phase_factor`, `orbit_per_atom`, `atom_permutation`) and a
 - **To DeepH format**: `DeepHData.from_aimspy(structure, hamiltonian=matrix, ...)`
   handles atom reordering (aims → POSCAR) and unit conversion (Hartree → eV).
 
-### Accuracy
-
-| Round-trip | max|diff| |
-|------------|----------|
-| aims → aimspy → aims | 5.55e-17 Hartree (machine precision) |
-| aimspy → DeepH → aimspy → aims | 1.78e-15 Hartree |
-
 ### Limitations
 
 - **Spinless only**: converters read/write spin channel 0; `n_spin=2` leaves
