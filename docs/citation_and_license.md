@@ -2,27 +2,11 @@
 
 ## Citation
 
-Since AimsPy drives FHI-aims calculations, please cite the **FHI-aims** original paper:
+Since AimsPy is part of the DeepH ecosystem and drives FHI-aims calculations, we recommend citing the following papers:
 
-[Volker Blum, Ralf Gehrke, Felix Hanke, Paula Havu, Ville Havu, Xinguo Ren, Karsten Reuter, Matthias Scheffler. Ab initio molecular simulations with numeric atom-centered orbitals. Computer Physics Communications 180(11), 2175–2196 (2009)](https://doi.org/10.1016/j.cpc.2009.06.022)
+### 1. DeepH-pack
 
-```bibtex
-@article{BLUM20092175,
-    title = {Ab initio molecular simulations with numeric atom-centered orbitals},
-    journal = {Computer Physics Communications},
-    volume = {180},
-    number = {11},
-    pages = {2175--2196},
-    year = {2009},
-    issn = {0010-4655},
-    doi = {https://doi.org/10.1016/j.cpc.2009.06.022},
-    url = {https://www.sciencedirect.com/science/article/pii/S0010465509002033},
-    author = {Volker Blum and Ralf Gehrke and Felix Hanke and Paula Havu and Ville Havu and Xinguo Ren and Karsten Reuter and Matthias Scheffler},
-    keywords = {molecular simulations, Density-functional theory, Atom-centered basis functions, Hartree--Fock, MP2, O(N) DFT, self-energy}
-}
-```
-
-If you use this code in your academic work, please also cite **the complete package featuring the latest implementation, methodology, and workflow of [DeepH](https://github.com/kYangLi/DeepH-pack-docs)**:
+The complete package featuring the latest implementation, methodology, and workflow of [DeepH](https://github.com/kYangLi/DeepH-pack-docs):
 
 [Yang Li, Yanzhen Wang, Boheng Zhao, *et al*. DeepH-pack: A general-purpose neural network package for deep-learning electronic structure calculations. arXiv:2601.02938 (2026)](https://arxiv.org/abs/2601.02938)
 
@@ -32,6 +16,32 @@ If you use this code in your academic work, please also cite **the complete pack
     author={Li, Yang and Wang, Yanzhen and Zhao, Boheng and Gong, Xiaoxun and Wang, Yuxiang and Tang, Zechen and Wang, Zixu and Yuan, Zilong and Li, Jialin and Sun, Minghui and Chen, Zezhou and Tao, Honggeng and Wu, Baochun and Yu, Yuhang and Li, He and da Jornada, Felipe H. and Duan, Wenhui and Xu, Yong },
     journal={arXiv preprint arXiv:2601.02938},
     year={2026}
+}
+```
+
+### 2. DeepH-aims
+
+The paper describing the DeepH–FHI-aims integration workflow (in publishing):
+
+<!-- TODO: fill in the DeepH-aims paper citation once published. -->
+[Authors]. [Title]. [Journal], in publishing.
+
+### 3. FHI-aims
+
+The original FHI-aims paper, since AimsPy drives FHI-aims calculations:
+
+[Volker Blum, Ralf Gehrke, Felix Hanke, Paula Havu, Ville Havu, Xinguo Ren, Karsten Reuter, Matthias Scheffler. Ab initio molecular simulations with numeric atom-centered orbitals. Computer Physics Communications 180(11), 2175–2196 (2009)](https://doi.org/10.1016/j.cpc.2009.06.022)
+
+```bibtex
+@article{blum2009ab,
+  title={Ab initio molecular simulations with numeric atom-centered orbitals},
+  author={Blum, Volker and Gehrke, Ralf and Hanke, Felix and Havu, Paula and Havu, Ville and Ren, Xinguo and Reuter, Karsten and Scheffler, Matthias},
+  journal={Comput. Phys. Communi.},
+  volume={180},
+  number={11},
+  pages={2175},
+  year={2009},
+  publisher={Elsevier}
 }
 ```
 

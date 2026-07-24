@@ -137,6 +137,7 @@ After patching, build FHI-aims as a **shared library** (Intel OneAPI for MPI + M
 # Ensure the OneAPI environment is sourced (see Prerequisites above)
 ulimit -s unlimited
 mkdir build && cd build
+# Prepare the Cmake file
 cmake -DUSE_MPI=ON -DUSE_LIBXS=OFF -DBUILD_SHARED_LIBS=ON -C initial_cache.cmake ..
 make -j 8
 ```
@@ -145,9 +146,9 @@ make -j 8
 >
 > AimsPy loads `libaims.so` via `ctypes` at runtime, so you **must**
 > pass `-DBUILD_SHARED_LIBS=ON` to CMake. Without it, FHI-aims builds
-> a static archive (`libaims.a`) which AimsPy cannot load.
+> a static archive (`libaims.a` or `libaims.x`) which AimsPy cannot load.
 
-The resulting `libaims.so` is what AimsPy loads. FHI-aims itself is **not** distributed with AimsPy and remains under its own licence agreement with the aims team — users must obtain the FHI-aims source code independently.
+The resulting `libaims.so` is what AimsPy loads. FHI-aims itself is **not** distributed with AimsPy and remains under its own licence agreement with the aims team, users must obtain the FHI-aims source code independently.
 
 ## Install from Source (for Developers)
 
@@ -176,7 +177,7 @@ export AIMSPY_TEST_AIMS_LIBPATH=/path/to/FHI-aims-deeph/build/libaims.so
 
 Optional:
 
-- `AIMSPY_TEST_NPROC` — MPI process count for integration tests and examples (default: `8`).
+- `AIMSPY_TEST_NPROC`: MPI process count for integration tests and examples (default: `8`).
 
 For example, to run the H₂O baseline SCF example:
 

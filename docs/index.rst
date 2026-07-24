@@ -132,7 +132,9 @@ For complete examples — baseline SCF, DeepH warmstart, DeepH export, and error
 Citation
 ^^^^^^^^
 
-If you use this code in your academic work, please cite **the complete package featuring the latest implementation, methodology, and workflow of `DeepH <https://github.com/kYangLi/DeepH-pack-docs>`_**:
+Since AimsPy is part of the DeepH ecosystem and drives FHI-aims calculations, we recommend citing the following papers. Full details are on the `Citation & License <./citation_and_license.html>`_ page.
+
+**1. DeepH-pack** — the complete package featuring the latest implementation, methodology, and workflow of `DeepH <https://github.com/kYangLi/DeepH-pack-docs>`_:
 
 `Yang Li, Yanzhen Wang, Boheng Zhao, et al. DeepH-pack: A general-purpose neural network package for deep-learning electronic structure calculations. arXiv:2601.02938 (2026) <https://arxiv.org/abs/2601.02938>`_
 
@@ -144,6 +146,12 @@ If you use this code in your academic work, please cite **the complete package f
         journal={arXiv preprint arXiv:2601.02938},
         year={2026}
     }
+
+**2. DeepH-aims** — the paper describing the DeepH–FHI-aims integration workflow (in publishing).
+
+**3. FHI-aims** — the original FHI-aims paper, since AimsPy drives FHI-aims calculations:
+
+`Volker Blum, Ralf Gehrke, Felix Hanke, et al. Ab initio molecular simulations with numeric atom-centered orbitals. Computer Physics Communications 180(11), 2175-2196 (2009) <https://doi.org/10.1016/j.cpc.2009.06.022>`_
 
 
 ----
