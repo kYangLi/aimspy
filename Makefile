@@ -1,6 +1,6 @@
 .PHONY: clean install test test-baseline test-warmstart test-capture-overlap \
         test-regression test-export-deeph test-strategies test-integration \
-        test-all run-from-scratch run-continue-calc run-example \
+        test-all test-memory-loop run-from-scratch run-continue-calc run-example \
         build lint help patch
 
 VENV := .venv
@@ -19,6 +19,7 @@ help:
 	@echo "  test-regression      Run regression test (needs rs_hamiltonian.out + deeph_out/)"
 	@echo "  test-strategies      Run strategy test (needs rs_hamiltonian.out + deeph_out/)"
 	@echo "  test-integration     Run all 6 integration tests in dependency order"
+	@echo "  test-memory-loop     Run 15-cycle memory pressure test (capture_overlap=True)"
 	@echo "  test-all             Run unit + integration tests"
 	@echo "  run-from-scratch     Run H2O baseline SCF + DeepH export example"
 	@echo "  run-continue-calc    Run H2O warmstart example (needs run-from-scratch first)"
@@ -32,6 +33,8 @@ help:
 	@echo "Environment variables:"
 	@echo "  AIMSPY_TEST_AIMS_LIBPATH  Path to patched libaims.so (required for integration)"
 	@echo "  AIMSPY_TEST_NPROC         MPI process count (default: 8)"
+	@echo "  AIMSPY_MEM_LOOP_N         Memory loop iterations (default: 15)"
+	@echo "  AIMSPY_MEM_LOOP_THRESHOLD_KB  Max RSS drift in last 5 iters (default: 100MB)"
 	@echo ""
 	@echo "Prerequisites for integration tests:"
 	@echo "  source /path/to/intel/setvars.sh   (Intel OneAPI for MPI + MKL)"
@@ -65,6 +68,9 @@ test-regression:
 
 test-strategies:
 	ulimit -s unlimited && python tests/test_strategies.py
+
+test-memory-loop:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_memory_loop.py
 
 test-integration: test-baseline test-export-deeph test-warmstart \
                   test-capture-overlap test-regression test-strategies

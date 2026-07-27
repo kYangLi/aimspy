@@ -738,26 +738,17 @@ class Calculator:
             return None
 
         # ── Deferred mode: return a decorator ──
+        # NOTE: Do NOT capture `self` in any closure here — that would
+        # create a reference cycle (Calculator._modify -> ... -> closure
+        # -> self -> Calculator). Instead, store the user's function and
+        # option directly in _modify; _on_python_func constructs a
+        # lightweight view from aux at runtime and passes it to the user fn.
         def decorator(fn: Callable) -> Callable:
             user_option = option if option is not None else {}
-            calc = self  # capture for closure
-
-            def to_aimspy(structure: AimspyStructure) -> AimspyMatrix:
-                # Called from _on_python_func during python_func callback.
-                # At this point calc.initial_hamiltonian / .overlap etc.
-                # are available (if capture_* was enabled).
-                src = fn(calc, user_option)
-                if src is None:
-                    raise AimspyConfigError(
-                        "deferred modify_init_ham source function returned None; "
-                        "it must return an object with a "
-                        "to_aimspy(structure) method"
-                    )
-                return src.to_aimspy(structure)
-
-            wrapper = SimpleNamespace(to_aimspy=to_aimspy)
             self._modify = SimpleNamespace(
-                source=wrapper,
+                source=None,  # no pre-built source (deferred)
+                deferred_fn=fn,  # user's source-generating function
+                deferred_option=user_option,
                 strategy=strategy,
                 factor=factor,
                 custom_fn=custom_fn,
@@ -904,15 +895,44 @@ class Calculator:
             self._log_warning("defensive aimspy_finalize raised: %r", e)
 
     def _clear_all_state(self) -> None:
-        """Clear all retained state fields. Idempotent."""
+        """Clear all retained state fields. Idempotent.
+
+        Explicitly releases all internal references to ensure immediate
+        refcount-based reclamation (no dependence on cyclic GC). This is
+        critical because callback wrappers and deferred modify sources
+        can otherwise retain large numpy arrays (overlap, Hamiltonian)
+        across calculation cycles.
+        """
         self._state = CalcState.FINALIZED
+        # CallbackManager: release all wrappers, aux objects, py_object
+        # anchors, and error records. This breaks any user-side reference
+        # cycles (e.g. if a user callback fn captured `calc`).
+        if self._cb_mgr is not None:
+            self._cb_mgr.clear()
+        # BindingLib: release CDLL references
         self._binding = None
+        # CallbackManager: drop the manager itself (no self-cycle after fix)
         self._cb_mgr = None
+        # Runtime aux dict: may hold large AimspyMatrix (overlap, H_init)
         self._runtime_aux = None
+        # Info snapshot
         self._info = None
+        # Structure descriptor
         self._structure = None
+        # Forces cache
         self._forces = None
+        # Modify config: explicitly clear internal fields before dropping,
+        # to release user fn / source / option references
+        if self._modify is not None:
+            self._modify.source = None
+            self._modify.custom_fn = None
+            # Deferred mode fields (absent in direct mode — guard with hasattr)
+            if hasattr(self._modify, "deferred_fn"):
+                self._modify.deferred_fn = None
+            if hasattr(self._modify, "deferred_option"):
+                self._modify.deferred_option = None
         self._modify = None
+        # Pending callback registrations
         self._pending_callbacks.clear()
 
     # ----------------------------------------------------------------
@@ -969,7 +989,7 @@ class Calculator:
                 csr = ax.get("csr_descr")
                 if csr is not None:
                     ax["overlap"] = AimspyMatrix.from_aims_csr(
-                        ovlp, csr, self.structure
+                        ovlp, csr, ax["structure"]
                     )
 
             self._cb_mgr.register(SPECS_BY_NAME["export_ovlp"], _on_export_overlap, aux)
@@ -983,7 +1003,7 @@ class Calculator:
                 csr = ax.get("csr_descr")
                 if csr is not None:
                     ax["initial_hamiltonian"] = AimspyMatrix.from_aims_csr(
-                        h_init, csr, self.structure
+                        h_init, csr, ax["structure"]
                     )
 
             self._cb_mgr.register(
@@ -992,19 +1012,42 @@ class Calculator:
                 aux,
             )
 
-        # 4. python_func — convert external → aimspy (if modify.source)
+        # 4. python_func — convert external → aimspy (if modify.source or deferred_fn)
         if (
             mspec is not None
-            and mspec.source is not None
+            and (
+                mspec.source is not None
+                or getattr(mspec, "deferred_fn", None) is not None
+            )
             and not self._cb_mgr.is_registered("python_func")
         ):
 
             def _on_python_func(ax):
                 md = ax["modify"]
-                if md is None or md.source is None:
+                if md is None:
                     return
                 if ax.get("external_aimspy") is None:
-                    ax["external_aimspy"] = md.source.to_aimspy(self.structure)
+                    structure = ax["structure"]
+                    if md.source is not None:
+                        # Direct mode: pre-built source
+                        ax["external_aimspy"] = md.source.to_aimspy(structure)
+                    elif getattr(md, "deferred_fn", None) is not None:
+                        # Deferred mode: construct a lightweight view from aux
+                        # so the user function can access initial_hamiltonian
+                        # / overlap / structure without capturing Calculator.
+                        view = SimpleNamespace(
+                            initial_hamiltonian=ax.get("initial_hamiltonian"),
+                            overlap=ax.get("overlap"),
+                            structure=structure,
+                        )
+                        src = md.deferred_fn(view, md.deferred_option)
+                        if src is None:
+                            raise AimspyConfigError(
+                                "deferred modify_init_ham source function returned None; "
+                                "it must return an object with a "
+                                "to_aimspy(structure) method"
+                            )
+                        ax["external_aimspy"] = src.to_aimspy(structure)
 
             self._cb_mgr.register(SPECS_BY_NAME["python_func"], _on_python_func, aux)
 
@@ -1016,10 +1059,11 @@ class Calculator:
                 csr = ax.get("csr_descr")
                 if md is None or csr is None:
                     return
+                structure = ax["structure"]  # local ref, avoids repeated lookup
                 ext = ax.get("external_aimspy")
-                live = AimspyMatrix.from_aims_csr(h_init, csr, self.structure)
-                _apply_strategy(md, live, ext, self.structure, ax)
-                new_h = live.to_aims_csr(csr, self.structure)
+                live = AimspyMatrix.from_aims_csr(h_init, csr, structure)
+                _apply_strategy(md, live, ext, structure, ax)
+                new_h = live.to_aims_csr(csr, structure)
                 n_bytes = int(n_ham) * int(n_spin) * sizeof(c_double)
                 memmove(h_init.ctypes.data, new_h.ctypes.data, n_bytes)
 

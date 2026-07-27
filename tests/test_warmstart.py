@@ -3,6 +3,9 @@
 
 Tests both direct source and deferred source modes.
 
+Also verifies that RSS memory does not accumulate across two consecutive
+Calculator cycles (reference-cycle regression test).
+
 Usage:
     source /path/to/intel/setvars.sh
     ulimit -s unlimited
@@ -12,6 +15,7 @@ Usage:
 
 from __future__ import annotations
 
+import gc
 import os
 import sys
 from pathlib import Path
@@ -53,6 +57,28 @@ if not DEEPH_DIR.is_dir():
     sys.exit(1)
 
 
+def _rss_kb() -> int:
+    """Return current process RSS in KB (Linux only)."""
+    try:
+        with open(f"/proc/{os.getpid()}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS"):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
+
+
+def _rss_snapshot(label: str) -> int:
+    """Take an RSS snapshot after gc.collect() on all ranks, print on rank 0."""
+    gc.collect()
+    comm.Barrier()
+    rss = _rss_kb()
+    if rank == 0:
+        print(f"[mem] {label}: RSS = {rss} KB ({rss / 1024:.1f} MB)")
+    return rss
+
+
 def check_result(label, H, ref_H):
     ok = np.allclose(H, ref_H, atol=1e-6)
     if rank == 0:
@@ -66,6 +92,11 @@ def check_result(label, H, ref_H):
 
 ref_H = np.loadtxt(DATA_DIR / "rs_hamiltonian.out", dtype=np.float64)
 ref_H = ref_H.reshape(1, -1) if ref_H.ndim == 1 else ref_H
+
+# =============================================================================
+# RSS baseline (before any Calculator runs)
+# =============================================================================
+rss_baseline = _rss_snapshot("baseline (before any calc)")
 
 # =============================================================================
 # Test 1: Direct source (pre-built DeepHData)
@@ -100,6 +131,9 @@ try:
 finally:
     calc.close()
     comm.Barrier()
+
+# RSS after 1st calc cycle (direct mode, no capture_overlap)
+rss_after_1 = _rss_snapshot("after 1st calc (direct, close'd)")
 
 # =============================================================================
 # Test 2: Deferred source (decorator, source generated at runtime)
@@ -140,16 +174,50 @@ finally:
     calc2.close()
     comm.Barrier()
 
+# RSS after 2nd calc cycle (deferred mode, capture_initial_hamiltonian)
+rss_after_2 = _rss_snapshot("after 2nd calc (deferred, close'd)")
+
+# =============================================================================
+# Memory regression check: RSS should not grow unboundedly across cycles.
+# A small delta is expected (malloc arena caching, MKL internal buffers),
+# but a large delta indicates a leak (e.g. reference cycle not broken).
+# =============================================================================
+# MoS2 test system is small (~90 basis, ~91k hamiltonian entries).
+# Allow up to 200 MB growth for malloc/arena caching on this small system.
+# Larger systems would need a higher threshold.
+MEM_DELTA_THRESHOLD_KB = 200 * 1024  # 200 MB
+rss_delta = rss_after_2 - rss_after_1
+mem_ok = rss_delta < MEM_DELTA_THRESHOLD_KB
+
+if rank == 0:
+    print()
+    print("=" * 60)
+    print("Memory Regression Check")
+    print("=" * 60)
+    print(f"  RSS baseline:     {rss_baseline:>10d} KB ({rss_baseline / 1024:.1f} MB)")
+    print(f"  RSS after 1st:    {rss_after_1:>10d} KB ({rss_after_1 / 1024:.1f} MB)")
+    print(f"  RSS after 2nd:    {rss_after_2:>10d} KB ({rss_after_2 / 1024:.1f} MB)")
+    print(f"  Delta (2nd - 1st): {rss_delta:>10d} KB ({rss_delta / 1024:.1f} MB)")
+    print(
+        f"  Threshold:         {MEM_DELTA_THRESHOLD_KB:>10d} KB ({MEM_DELTA_THRESHOLD_KB / 1024:.1f} MB)"
+    )
+    if mem_ok:
+        print("  MEM CHECK PASSED — no unbounded growth")
+    else:
+        print("  MEM CHECK FAILED — RSS grew beyond threshold (possible leak)")
+
 # =============================================================================
 # Summary
 # =============================================================================
 if rank == 0:
     print()
     print("=" * 60)
-    if ok1 and ok2:
-        print("ALL WARMSTART TESTS PASSED")
+    if ok1 and ok2 and mem_ok:
+        print("ALL WARMSTART TESTS PASSED (incl. memory check)")
+    elif ok1 and ok2:
+        print("WARMSTART TESTS PASSED, but memory check FAILED")
     else:
         print("SOME TESTS FAILED")
     print("=" * 60)
-    if not (ok1 and ok2):
+    if not (ok1 and ok2 and mem_ok):
         sys.exit(1)

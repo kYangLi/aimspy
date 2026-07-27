@@ -143,6 +143,21 @@ class CallbackManager:
     def is_registered(self, spec_name: str) -> bool:
         return spec_name in self._wrapped
 
+    def clear(self) -> None:
+        """Release all held references: CFUNCTYPE wrappers, aux objects,
+        py_object anchors, and error records.
+
+        Must be called before dropping the CallbackManager reference to
+        ensure immediate refcount-based reclamation of all callback
+        state (including user aux dicts that may hold large matrices).
+        After clear(), the CallbackManager is empty and must not be used
+        to fire callbacks.
+        """
+        self._wrapped.clear()
+        self._auxs.clear()
+        self._pyobjs.clear()
+        self._errors.clear()
+
     # ------------------------------------------------------------------
     # Internal: auto-wrap user Python fn → ctypes wrapper
     # ------------------------------------------------------------------
@@ -157,7 +172,13 @@ class CallbackManager:
         2.  converts pointer args to numpy ndarray views where applicable
         3.  calls the original *fn* with Python-friendly arguments
         """
-        mgr = self  # keep the closure binding to the manager for error recording
+        # Capture only the error list (a leaf object), NOT the manager itself.
+        # Capturing `self` would create a reference cycle
+        # (CallbackManager._wrapped -> wrapper_closure -> mgr -> CallbackManager)
+        # that prevents refcount-based reclamation and forces reliance on the
+        # cyclic garbage collector. Capturing the list directly breaks the
+        # cycle while preserving the error-recording capability.
+        errors = self._errors
 
         if spec.name == "get_descr":
 
@@ -172,7 +193,7 @@ class CallbackManager:
                     _aux["descr"] = CsrMatrixDescriptor._from_c_struct(ptr.contents)
                     fn(_aux)
                 except Exception as exc:
-                    _record_callback_error(mgr, spec.name, exc)
+                    _record_callback_error(errors, spec.name, exc)
 
         elif spec.name == "export_ovlp":
 
@@ -183,7 +204,7 @@ class CallbackManager:
                     ovlp.flags.writeable = False  # Fortran intent(in)
                     fn(_aux, ovlp, int(n_ham), int(n_spin))
                 except Exception as exc:
-                    _record_callback_error(mgr, spec.name, exc)
+                    _record_callback_error(errors, spec.name, exc)
 
         elif spec.name == "export_h0":
 
@@ -194,7 +215,7 @@ class CallbackManager:
                     h0.flags.writeable = False  # Fortran intent(in)
                     fn(_aux, h0, int(n_ham), int(n_spin))
                 except Exception as exc:
-                    _record_callback_error(mgr, spec.name, exc)
+                    _record_callback_error(errors, spec.name, exc)
 
         elif spec.name == "modify_h0":
 
@@ -206,7 +227,7 @@ class CallbackManager:
                     h0 = _ptr_to_view(h0_ptr, (int(n_spin), int(n_ham)))
                     fn(_aux, h0, int(n_ham), int(n_spin))
                 except Exception as exc:
-                    _record_callback_error(mgr, spec.name, exc)
+                    _record_callback_error(errors, spec.name, exc)
 
         elif spec.name == "python_func":
 
@@ -215,7 +236,7 @@ class CallbackManager:
                 try:
                     fn(_aux)
                 except Exception as exc:
-                    _record_callback_error(mgr, spec.name, exc)
+                    _record_callback_error(errors, spec.name, exc)
 
         else:
             # Generic fallback: pass unpacked aux only
@@ -224,7 +245,7 @@ class CallbackManager:
                 try:
                     fn(_aux, *rest)
                 except Exception as exc:
-                    _record_callback_error(mgr, spec.name, exc)
+                    _record_callback_error(errors, spec.name, exc)
 
         return wrapper
 
@@ -272,8 +293,13 @@ def _ptr_to_view(ptr, shape: Tuple[int, ...]) -> np.ndarray:
     raise TypeError(f"Cannot create ndarray view from ptr type={type(ptr)}")
 
 
-def _record_callback_error(mgr: "CallbackManager", name: str, exc: Exception) -> None:
-    """Report a callback failure to stderr, logger, and the manager's error list."""
+def _record_callback_error(errors: list, name: str, exc: Exception) -> None:
+    """Report a callback failure to stderr, logger, and the error list.
+
+    Accepts the error list directly (rather than the CallbackManager) so
+    that wrapper closures can capture a leaf object instead of the
+    manager itself, avoiding a reference cycle.
+    """
     import sys
     import traceback
 
@@ -281,5 +307,5 @@ def _record_callback_error(mgr: "CallbackManager", name: str, exc: Exception) ->
     print(f"[aimspy] {name} callback FAILED: {exc!r}", file=sys.stderr, flush=True)
     traceback.print_exc(file=sys.stderr)
     _log.error("%s callback raised %s\n%s", name, exc, tb_str)
-    if hasattr(mgr, "_errors") and mgr._errors is not None:
-        mgr._errors.append((name, exc, tb_str))
+    if errors is not None:
+        errors.append((name, exc, tb_str))
