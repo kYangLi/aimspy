@@ -67,7 +67,7 @@ class AimspyInfoC(Structure):
 class CsrMxDescrC(Structure):
     """ctypes mirror of Fortran `TAimspyCsrMxDescr` (callback.f90:11).
 
-    Field order MUST match callback.f90:11-19 exactly.
+    Field order MUST match callback.f90:11-20 exactly.
     """
 
     _fields_ = [
@@ -75,6 +75,7 @@ class CsrMxDescrC(Structure):
         ("n_spin", c_int),
         ("n_cells", c_int),
         ("n_ham_size", c_int),
+        ("n_cells_array", c_int),  # actual size of cell_index array
         ("cell_idx", POINTER(c_int)),
         ("row_mx_idx", POINTER(c_int)),
         ("col_mx_idx", POINTER(c_int)),

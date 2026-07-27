@@ -171,7 +171,23 @@ class AimspyMatrix:
 
                     v = h0[0, k] * pi * pj  # apply parity
                     blocks[key][orb_i, orb_j] = v
-                    blocks[rev_key][orb_j, orb_i] = v  # Hermitian
+
+                    # Hermitian partner: write if unset, else verify consistency.
+                    # CSR stores upper-triangle only, so the reverse entry
+                    # (j,i) at -R should already equal (i,j) at R. If it was
+                    # previously written (abs > 1e-12), check agreement within
+                    # 1e-11 — well above double round-off (~1e-13 for |v|~1e3).
+                    existing_rev = blocks[rev_key][orb_j, orb_i]
+                    if abs(existing_rev) <= 1e-12:
+                        blocks[rev_key][orb_j, orb_i] = v
+                    elif abs(existing_rev - v) > 1e-11:
+                        from ._exceptions import AimspyError
+
+                        raise AimspyError(
+                            f"Hermitian check failed at R=({R0},{R1},{R2}), "
+                            f"atom=({atom_i},{atom_j}), orb=({orb_i},{orb_j}): "
+                            f"existing={existing_rev:.6e}, new={v:.6e}"
+                        )
 
         return cls(blocks=blocks, n_spin=int(h0.shape[0]))
 

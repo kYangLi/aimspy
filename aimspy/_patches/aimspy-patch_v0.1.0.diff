@@ -44,7 +44,7 @@ index bb052399..68afa156 100644
  # ASI API
  target_sources(aims1 PRIVATE dft_api_data.f90 dft_api.f90 apicallback.f90)
  
-+# AimsPy API
++# AimSpy API
 +add_subdirectory(aimspy_api)
 +
  # i-Pi Python interface
@@ -56,7 +56,7 @@ index 00000000..4abdeabf
 --- /dev/null
 +++ b/src/aimspy_api/CMakeLists.txt
 @@ -0,0 +1,15 @@
-+# AimsPy API
++# AimSpy API
 +# These files are added to aims1, same layer as ASI API files.
 +
 +target_sources(aims1 PRIVATE
@@ -174,10 +174,10 @@ index 00000000..f8180616
 \ No newline at end of file
 diff --git a/src/aimspy_api/callback.f90 b/src/aimspy_api/callback.f90
 new file mode 100644
-index 00000000..66a84730
+index 00000000..b9129478
 --- /dev/null
 +++ b/src/aimspy_api/callback.f90
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,289 @@
 +module aimspy_callback
 +
 +    use iso_c_binding
@@ -193,8 +193,9 @@ index 00000000..66a84730
 +            integer(c_int) :: n_spin
 +            integer(c_int) :: n_cells
 +            integer(c_int) :: n_ham_size ! nnz + 1
++            integer(c_int) :: n_cells_array ! actual size of cell_index array (may be > n_cells)
 +
-+            type(c_ptr)  :: cell_idx     = c_null_ptr  ! cell_index, shape (n_cells, n_coords), n_coords = 3
++            type(c_ptr)  :: cell_idx     = c_null_ptr  ! cell_index, shape (n_cells_array, n_coords), n_coords = 3
 +            type(c_ptr)  :: row_mx_idx   = c_null_ptr  ! index_hamiltonian, shape (2, n_cells, n_basis)
 +            type(c_ptr)  :: col_mx_idx   = c_null_ptr  ! column_index_hamiltonian, shape (n_ham_size)
 +        end type TAimspyCsrMxDescr
@@ -300,6 +301,16 @@ index 00000000..66a84730
 +                descr%n_spin = int(n_spin, c_int)
 +                descr%n_cells = int(n_cells_in_hamiltonian, c_int)
 +                descr%n_ham_size = int(n_hamiltonian_matrix_size, c_int)
++
++                ! cell_index is allocated as cell_index(n_cells_new, 3), where
++                ! n_cells_new >= n_cells_in_hamiltonian. We report the actual
++                ! array size so Python can read with the correct column-major
++                ! stride, then slice to the first n_cells_in_hamiltonian entries.
++                if (allocated(cell_index)) then
++                    descr%n_cells_array = int(size(cell_index, 1), c_int)
++                else
++                    descr%n_cells_array = 0
++                end if
 +
 +                descr%cell_idx = c_loc(cell_index(1,1))
 +                descr%row_mx_idx = c_loc(index_hamiltonian(1,1,1))

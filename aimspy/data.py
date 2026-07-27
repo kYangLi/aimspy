@@ -190,15 +190,26 @@ def _decode_fortran_char_array(ptr, n_items, item_len):
 
 
 def _csr_from_c_struct(c):
-    """Populate a CsrMatrixDescriptor from the C-side struct ``CsrMxDescrC``."""
+    """Populate a CsrMatrixDescriptor from the C-side struct ``CsrMxDescrC``.
+
+    cell_index is allocated in Fortran as cell_index(n_cells_array, 3), where
+    n_cells_array >= n_cells (= n_cells_in_hamiltonian). We read the full
+    array with n_cells_array as the column-major stride, then slice to the
+    first n_cells entries — exactly what output_real_space_matrices.f90
+    writes to rs_indices.out.
+    """
+    n_cells_ham = int(c.n_cells)  # n_cells_in_hamiltonian (loop bound)
+    n_cells_arr = int(c.n_cells_array)  # actual size of cell_index array
     return CsrMatrixDescriptor(
         n_basis=int(c.n_basis),
         n_spin=int(c.n_spin),
-        n_cells=int(c.n_cells),
+        n_cells=n_cells_ham,
         n_ham_size=int(c.n_ham_size),
-        cell_idx=_view_i(c.cell_idx, (3, c.n_cells)).astype(np.int32),
-        row_mx_idx=_view_i(c.row_mx_idx, (c.n_basis, c.n_cells, 2)).astype(np.int32),
-        col_mx_idx=_view_i(c.col_mx_idx, (c.n_ham_size,)).astype(np.int32),
+        cell_idx=_view_i(c.cell_idx, (3, n_cells_arr))[:, :n_cells_ham].astype(
+            np.int32
+        ),
+        row_mx_idx=_view_i(c.row_mx_idx, (c.n_basis, n_cells_ham, 2)).astype(np.int32),
+        col_mx_idx=_view_i(c.col_mx_idx, (int(c.n_ham_size),)).astype(np.int32),
     )
 
 
