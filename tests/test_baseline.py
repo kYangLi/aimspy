@@ -68,6 +68,15 @@ try:
         _baseline_ok = np.allclose(H, ref_H, atol=1e-6)
         print(f"[baseline] close to ref = {_baseline_ok}")
         print(f"[baseline] energy = {calc.energy:.6f} Hartree")
+        F = calc.forces
+        if F is not None:
+            print(f"[baseline] forces shape: {F.shape}")
+            print(f"[baseline] max|F| = {np.max(np.abs(F)):.6e} eV/Å")
+            _force_ok = F.shape == (calc.info.n_atoms, 3) and np.all(np.isfinite(F))
+        else:
+            print("[baseline] forces: None (compute_forces not set)")
+            _force_ok = True  # not a failure if forces not requested
+        print(f"[baseline] forces OK = {_force_ok}")
         if _baseline_ok:
             print("BASELINE TEST PASSED")
         else:
@@ -82,5 +91,5 @@ finally:
     calc.close()
     comm.Barrier()
 
-if rank == 0 and not _baseline_ok:
+if rank == 0 and (not _baseline_ok or not _force_ok):
     sys.exit(1)

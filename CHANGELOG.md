@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`DeepHData`: optional `force.h5` MD-style export** — new `force` /
+  `energy_eV` dataclass fields; `force=` / `energy=` keyword arguments on
+  `from_aimspy` / `from_memory` (accepts aims-order force array + Hartree
+  energy, auto-reorders / converts); `set_force` / `save_force` methods; auto
+  read/write in `from_directory` / `save`. The `force.h5` file uses a different
+  layout from matrix `.h5` files: `cell` (3,3), `energy` scalar, `force`
+  (n_atoms,3), `stress` (6,) zeros placeholder, with `formula` / `natoms`
+  root attributes. Forces are in eV/Å (matching `calc.forces`); energy is in
+  eV (converted from `calc.energy` Hartree).
+- `tests/unit/test_deeph_data.py` — 16 new unit tests for force functionality
+  (roundtrip, reorder, shape validation, list input, error cases).
+- Integration tests: `test_baseline.py` now checks forces shape/finite;
+  `test_export_deeph.py` adds 10 force.h5 cross-validation checks;
+  `test_regression.py` adds 10 force/energy checks (total 60 checks).
 - `tests/unit/test_force_close.py` — 9 unit tests for `force_close()` and
   `CalcState` transitions (no MPI/libaims required).
 - `tests/conftest.py` — prevents pytest from collecting integration test

@@ -333,3 +333,326 @@ class TestHelpers:
         eom = _build_elements_orbital_map(struct)
         assert "Mo" in eom
         assert "S" in eom
+
+
+# =============================================================================
+# Tests: force / energy (MD-style force.h5)
+# =============================================================================
+def _make_mock_structure_unsorted():
+    """3-atom MoS2-like structure with NON-identity permutation.
+
+    aims order: ['S', 'Mo', 'S'] → POSCAR order: ['Mo', 'S', 'S']
+    new2old = [1, 0, 2], old2new = [1, 0, 2]
+    (coincidentally equal here, but this still tests non-trivial reordering)
+    """
+    return AimspyStructure(
+        n_atoms=3,
+        n_basis=5,
+        n_spin=1,
+        n_periodic=3,
+        lattice=np.eye(3) * 10.0,
+        atom_symbols=["S", "Mo", "S"],  # non-identity vs POSCAR ['Mo','S','S']
+        atom_coords=np.array([[1.5, 1.5, 0], [0, 0, 0], [1.5, 1.5, 3.0]]),
+        basis_atom=np.array([1, 1, 1, 0, 2], dtype=np.int32),
+        basis_l=np.array([0, 0, 1, 0, 0], dtype=np.int32),
+        basis_m=np.array([0, 0, -1, 0, 0], dtype=np.int32),
+    )
+
+
+class TestForce:
+    def test_save_load_force_roundtrip(self, tmp_path):
+        """save → from_directory roundtrip: force + energy preserved."""
+        force = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]]),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            force=force,
+            energy_eV=-123.45,
+            path=tmp_path,
+        )
+        dd.save()
+        assert (tmp_path / "force.h5").exists()
+
+        dd2 = DeepHData.from_directory(tmp_path)
+        assert dd2.force is not None
+        np.testing.assert_allclose(dd2.force, force)
+        assert dd2.energy_eV == pytest.approx(-123.45)
+
+    def test_from_aimspy_with_force_reorder(self):
+        """from_aimspy reorders force from aims → POSCAR order."""
+        struct = _make_mock_structure_unsorted()
+        # aims order: [S, Mo, S], POSCAR order: [Mo, S, S]
+        # force_aims = [[F_S1], [F_Mo], [F_S2]]
+        force_aims = np.array(
+            [[1.0, 0, 0], [2.0, 0, 0], [3.0, 0, 0]]  # S (aims idx 0)  # Mo (aims idx 1)
+        )  # S (aims idx 2)
+        blocks = _make_simple_blocks()  # uses aims atom indices
+
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            hamiltonian=AimspyMatrix(blocks=blocks, n_spin=1),
+            force=force_aims,
+            energy=-1.0,  # Hartree
+        )
+        # POSCAR order is [Mo, S, S], so force should be [2, 1, 3]
+        assert dd.force is not None
+        np.testing.assert_allclose(dd.force[:, 0], [2.0, 1.0, 3.0])
+        # energy: -1.0 Hartree → eV
+        assert dd.energy_eV == pytest.approx(-1.0 * 27.2113845)
+
+    def test_set_force_with_energy(self):
+        """set_force reorders + converts energy Hartree→eV."""
+        struct = _make_mock_structure_unsorted()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            hamiltonian=AimspyMatrix(blocks=_make_simple_blocks(), n_spin=1),
+        )
+        assert dd.force is None
+        assert dd.energy_eV is None
+
+        force_aims = np.array(
+            [[1.0, 0, 0], [2.0, 0, 0], [3.0, 0, 0]]  # S (aims 0)  # Mo (aims 1)
+        )  # S (aims 2)
+        dd.set_force(force_aims, structure=struct, energy=-0.5)  # Hartree
+
+        # POSCAR order [Mo, S, S] → [2, 1, 3]
+        np.testing.assert_allclose(dd.force[:, 0], [2.0, 1.0, 3.0])
+        assert dd.energy_eV == pytest.approx(-0.5 * 27.2113845)
+
+    def test_set_force_without_energy(self):
+        """set_force with energy=None leaves energy_eV unset."""
+        struct = _make_mock_structure_unsorted()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            hamiltonian=AimspyMatrix(blocks=_make_simple_blocks(), n_spin=1),
+        )
+        dd.set_force(np.zeros((3, 3)), structure=struct)
+        assert dd.force is not None
+        assert dd.energy_eV is None
+
+    def test_save_force_without_force_raises(self, tmp_path):
+        """save_force raises AimspyConfigError when force is None."""
+        from aimspy import AimspyConfigError
+
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            path=tmp_path,
+        )
+        with pytest.raises(AimspyConfigError, match="No force"):
+            dd.save_force()
+
+    def test_force_h5_format_matches_example(self, tmp_path):
+        """Written force.h5 has exact dataset/attr layout matching reference."""
+        import h5py
+
+        force = np.zeros((12, 3), dtype=np.float64)
+        lattice = np.eye(3) * 30.0
+        atom_symbols = ["C"] * 12  # benzene-like
+        dd = DeepHData.from_memory(
+            lattice=lattice,
+            atom_symbols=atom_symbols,
+            atom_coords=np.zeros((12, 3)),
+            elements_orbital_map={"C": [0, 0, 1]},
+            hamiltonian_blocks={(0, 0, 0, 0, 0): np.array([[1.0]])},
+            force=force,
+            energy_eV=-0.073,
+            path=tmp_path,
+        )
+        dd.save_force()
+
+        with h5py.File(tmp_path / "force.h5", "r") as f:
+            # Datasets
+            assert set(f.keys()) == {"cell", "energy", "force", "stress"}
+            assert f["cell"].shape == (3, 3)
+            assert f["cell"].dtype == np.float64
+            assert f["energy"].shape == ()
+            assert f["energy"].dtype == np.float64
+            assert f["force"].shape == (12, 3)
+            assert f["force"].dtype == np.float64
+            assert f["stress"].shape == (6,)
+            assert f["stress"].dtype == np.float64
+            np.testing.assert_allclose(f["stress"][:], np.zeros(6))
+            # Attrs
+            assert f.attrs["formula"] == b"X12"
+            assert int(f.attrs["natoms"]) == 12
+            # Energy value
+            assert float(f["energy"][()]) == pytest.approx(-0.073)
+
+    def test_force_h5_energy_defaults_to_zero(self, tmp_path):
+        """When energy_eV is None, force.h5 energy dataset is 0.0."""
+        import h5py
+
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            force=np.ones((3, 3)),
+            energy_eV=None,
+            path=tmp_path,
+        )
+        dd.save_force()
+        with h5py.File(tmp_path / "force.h5", "r") as f:
+            assert float(f["energy"][()]) == 0.0
+
+    def test_from_directory_force_shape_mismatch(self, tmp_path):
+        """force.h5 with wrong atom count raises AimspyConfigError."""
+        import h5py
+
+        from aimspy import AimspyConfigError
+
+        # First save a valid DeepH dir (3 atoms) with a matrix file
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            path=tmp_path,
+        )
+        dd.save()
+
+        # Overwrite force.h5 with wrong atom count (4 atoms instead of 3)
+        with h5py.File(tmp_path / "force.h5", "w") as f:
+            f.create_dataset("cell", data=np.eye(3) * 10.0)
+            f.create_dataset("energy", data=0.0)
+            f.create_dataset("force", data=np.zeros((4, 3)))
+            f.create_dataset("stress", data=np.zeros(6))
+            f.attrs["formula"] = b"X4"
+            f.attrs["natoms"] = np.int64(4)
+
+        with pytest.raises(AimspyConfigError, match="force.h5: force shape"):
+            DeepHData.from_directory(tmp_path)
+
+    def test_from_directory_force_wrong_columns(self, tmp_path):
+        """force.h5 with wrong column count (2 instead of 3) raises."""
+        import h5py
+
+        from aimspy import AimspyConfigError
+
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            path=tmp_path,
+        )
+        dd.save()
+
+        # Overwrite force.h5 with 3 atoms but 2 columns (wrong!)
+        with h5py.File(tmp_path / "force.h5", "w") as f:
+            f.create_dataset("cell", data=np.eye(3) * 10.0)
+            f.create_dataset("energy", data=0.0)
+            f.create_dataset("force", data=np.zeros((3, 2)))  # 2 cols, not 3
+            f.create_dataset("stress", data=np.zeros(6))
+            f.attrs["formula"] = b"X3"
+            f.attrs["natoms"] = np.int64(3)
+
+        with pytest.raises(AimspyConfigError, match="force.h5: force shape"):
+            DeepHData.from_directory(tmp_path)
+
+    def test_from_memory_force_shape_validation(self):
+        """from_memory rejects force with wrong shape."""
+        from aimspy import AimspyConfigError
+
+        with pytest.raises(AimspyConfigError, match="force shape"):
+            DeepHData.from_memory(
+                lattice=np.eye(3) * 10.0,
+                atom_symbols=["Mo", "S", "S"],
+                atom_coords=np.zeros((3, 3)),
+                elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+                hamiltonian_blocks=_make_simple_blocks(),
+                force=np.zeros((3, 2)),  # wrong: 2 columns
+            )
+
+    def test_set_force_shape_validation(self):
+        """set_force rejects force with wrong shape."""
+        from aimspy import AimspyConfigError
+
+        struct = _make_mock_structure_unsorted()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            hamiltonian=AimspyMatrix(blocks=_make_simple_blocks(), n_spin=1),
+        )
+        with pytest.raises(AimspyConfigError, match="force shape"):
+            dd.set_force(np.zeros((3, 2)), structure=struct)  # wrong: 2 cols
+
+    def test_from_aimspy_force_list_input(self):
+        """from_aimspy accepts Python list for force (not just ndarray)."""
+        struct = _make_mock_structure_unsorted()
+        # Pass as list, not ndarray — should work via np.asarray
+        force_list = [
+            [1.0, 0.0, 0.0],  # S (aims 0)
+            [2.0, 0.0, 0.0],  # Mo (aims 1)
+            [3.0, 0.0, 0.0],  # S (aims 2)
+        ]
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            hamiltonian=AimspyMatrix(blocks=_make_simple_blocks(), n_spin=1),
+            force=force_list,
+            energy=-1.0,
+        )
+        # POSCAR order [Mo, S, S] → [2, 1, 3]
+        np.testing.assert_allclose(dd.force[:, 0], [2.0, 1.0, 3.0])
+
+    def test_set_force_list_input(self):
+        """set_force accepts Python list for force (not just ndarray)."""
+        struct = _make_mock_structure_unsorted()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            hamiltonian=AimspyMatrix(blocks=_make_simple_blocks(), n_spin=1),
+        )
+        force_list = [[1.0, 0, 0], [2.0, 0, 0], [3.0, 0, 0]]
+        dd.set_force(force_list, structure=struct, energy=-0.5)
+        # POSCAR order [Mo, S, S] → [2, 1, 3]
+        np.testing.assert_allclose(dd.force[:, 0], [2.0, 1.0, 3.0])
+
+    def test_repr_includes_force_tag(self):
+        """__repr__ includes '+F' when force is set."""
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            force=np.ones((3, 3)),
+        )
+        r = repr(dd)
+        assert "+F" in r
+        assert "+H" in r
+
+    def test_repr_no_force_tag_when_unset(self):
+        """__repr__ does not include '+F' when force is None."""
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+        )
+        assert "+F" not in repr(dd)
+
+    def test_save_includes_force(self, tmp_path):
+        """save() writes force.h5 when force is set."""
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            force=np.ones((3, 3)),
+            energy_eV=42.0,
+            path=tmp_path,
+        )
+        dd.save()
+        assert (tmp_path / "force.h5").exists()
+        assert (tmp_path / "hamiltonian.h5").exists()

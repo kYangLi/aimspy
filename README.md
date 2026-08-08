@@ -47,7 +47,7 @@ For the most comprehensive usage documentation, please visit [https://docs.deeph
   Run FHI-aims SCF calculations directly from Python. Hamiltonian, overlap, energy, and forces are returned as native Python objects, ready for analysis or downstream processing.
 
 - **DeepH Export:** 
-  Export converged Hamiltonian, overlap, and free-atom initial Hamiltonian to the DeepH on-disk format in a single pipeline, ideal for generating training data for DeepH models.
+  Export converged Hamiltonian, overlap, and free-atom initial Hamiltonian to the DeepH on-disk format in a single pipeline, ideal for generating training data for DeepH models. Forces and total energy can optionally be exported to `force.h5` (MD-style format) for MD training data.
 
 - **Warmstart:** 
   Provide a pre-trained Hamiltonian (e.g. from a DeepH model) as the initial guess, and SCF converges in several iterations instead of the usual 10+. Strategies (`REPLACE`, `ADD`, `SCALE`, `CUSTOM`) cover warmstart, correction (Delta-prediction), scaling, and custom transforms.
@@ -186,6 +186,21 @@ with Calculator(config) as calc:
           initial_hamiltonian=calc.initial_hamiltonian,
       )
       dd.save("deeph_out/")
+```
+
+Optionally export forces and total energy to ``force.h5`` (MD-style format):
+
+```python
+if rank == 0:
+    dd = DeepHData.from_aimspy(
+        calc.structure,
+        hamiltonian=calc.hamiltonian,
+        overlap=calc.overlap,
+        initial_hamiltonian=calc.initial_hamiltonian,
+        force=calc.forces,    # (n_atoms, 3) eV/Å, aims order
+        energy=calc.energy,   # Hartree, auto-converted to eV
+    )
+    dd.save("deeph_out/")    # writes force.h5 alongside H/S/H0
 ```
 
 > **Note**: For the DeepH on-disk data format specification (POSCAR, info.json,

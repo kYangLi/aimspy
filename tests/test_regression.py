@@ -32,6 +32,7 @@ import numpy as np
 from mpi4py import MPI
 from aimspy import Calculator, CalculatorConfig
 from aimspy import DeepHData
+from aimspy.data import HARTREE_TO_EV
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE / "data" / "MoS2"
@@ -110,12 +111,14 @@ try:
     S_aimspy = None
     h_init = None
     energy = 0.0
+    forces = None
     if rank == 0:
         H = calc.rs_hamiltonian
         energy = calc.energy
         H_aimspy = calc.hamiltonian
         S_aimspy = calc.overlap
         h_init = calc.initial_hamiltonian
+        forces = calc.forces
 
     # Shared data (available on all ranks)
     s = calc.structure
@@ -126,6 +129,18 @@ try:
         check("H shape", H.shape == (1, calc.info.n_ham_size))
         check("H matches ref", np.allclose(H, ref_H, atol=1e-6))
         check("energy", energy < -4000, f"{energy:.6f}")
+        check(
+            "forces available",
+            forces is not None,
+            "compute_forces must be .true. in control.in",
+        )
+        if forces is not None:
+            check(
+                "forces shape",
+                forces.shape == (s.n_atoms, 3),
+                f"{forces.shape}",
+            )
+            check("forces finite", np.all(np.isfinite(forces)))
 
     # ── 2. Structure + CSR descriptor (all ranks) ────────────────────
     check("structure.n_atoms", s.n_atoms == 3, f"{s.n_atoms}")
@@ -191,6 +206,8 @@ try:
             hamiltonian=H_aimspy,
             overlap=S_aimspy,
             initial_hamiltonian=h_init,
+            force=forces,
+            energy=energy,
         )
         check("from_aimspy(H+S+H_init) n_atoms", dd_all.n_atoms == 3)
         check("from_aimspy(H+S+H_init) n_pairs", dd_all.n_pairs > 0)
@@ -203,6 +220,20 @@ try:
         check(
             "from_aimspy has initial_hamiltonian_entries",
             dd_all.initial_hamiltonian_entries is not None,
+        )
+        check("from_aimspy has force", dd_all.force is not None)
+        check("from_aimspy force shape", dd_all.force.shape == (3, 3))
+        check(
+            "from_aimspy energy_eV matches (Hartree→eV)",
+            abs(dd_all.energy_eV - energy * HARTREE_TO_EV) < 1e-6,
+            f"energy_eV={dd_all.energy_eV:.6f}",
+        )
+        # force reordering check: POSCAR → aims should match original
+        old2new, _ = s.build_atom_permutation()
+        force_back_to_aims = dd_all.force[old2new]
+        check(
+            "from_aimspy force reorder (POSCAR→aims)",
+            np.allclose(force_back_to_aims, forces, atol=1e-10),
         )
 
         # ── 8. from_aimspy save/load roundtrip ───────────────────────
@@ -223,6 +254,17 @@ try:
                 dd_reloaded.initial_hamiltonian_entries,
             ),
         )
+        check(
+            "save/load force entries",
+            dd_reloaded.force is not None
+            and np.allclose(dd_all.force, dd_reloaded.force),
+        )
+        check(
+            "save/load energy_eV",
+            dd_reloaded.energy_eV is not None
+            and abs(dd_all.energy_eV - dd_reloaded.energy_eV) < 1e-6,
+        )
+        check("save/load force.h5 exists", (tmp_dir2 / "force.h5").is_file())
         check(
             "save/load n_basis",
             dd_reloaded.n_basis == dd_all.n_basis,

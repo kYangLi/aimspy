@@ -73,6 +73,23 @@ with Calculator(config) as calc:
         dd.save("deeph_out/")
 ```
 
+To additionally export forces and total energy to `force.h5` (useful for MD training data), pass the `force=` and `energy=` keyword arguments:
+
+```python
+    if rank == 0:
+        dd = DeepHData.from_aimspy(
+            calc.structure,
+            hamiltonian=calc.hamiltonian,
+            overlap=calc.overlap,
+            initial_hamiltonian=calc.initial_hamiltonian,
+            force=calc.forces,    # (n_atoms, 3) eV/Å, aims order — auto-reordered to POSCAR
+            energy=calc.energy,   # Hartree — auto-converted to eV
+        )
+        dd.save("deeph_out/")    # writes force.h5 alongside H/S/H0
+```
+
+Forces are optional: if `calc.forces` is `None` (i.e. `compute_forces .true.` not set in `control.in`), simply omit the `force=` argument. Energy is only written to `force.h5` if `force` is also set; a standalone `save_force()` call requires `force` to be set first.
+
 > **Note**: For the DeepH on-disk data format specification (POSCAR, info.json,
 > .h5 files), see [DeepH-dock Key Concepts](https://docs.deeph-pack.com/deeph-dock/en/latest/key_concepts.html).
 

@@ -22,11 +22,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import h5py
 import numpy as np
 from mpi4py import MPI
 
 from aimspy import Calculator, CalculatorConfig
 from aimspy import DeepHData
+from aimspy.data import HARTREE_TO_EV
 
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE / "data" / "MoS2"
@@ -82,11 +84,21 @@ try:
         S_aimspy = calc.overlap
         h_init_aimspy = calc.initial_hamiltonian
         structure = calc.structure
+        forces_aimspy = calc.forces  # (n_atoms, 3) eV/Å, aims order
+        energy_hartree = calc.energy  # Hartree
 
         _info(f"  H:       {H_aimspy.n_pairs} pairs")
         _info(f"  S:       {S_aimspy.n_pairs} pairs")
         _info(f"  H_init:  {h_init_aimspy.n_pairs} pairs")
         _info(f"  structure: {structure.n_atoms} atoms, {structure.n_basis} basis")
+        if forces_aimspy is not None:
+            _info(
+                f"  forces:  shape={forces_aimspy.shape}, "
+                f"max|F|={np.max(np.abs(forces_aimspy)):.4e} eV/Å"
+            )
+        else:
+            _info("  forces:  None (compute_forces not set)")
+        _info(f"  energy:  {energy_hartree:.6f} Hartree")
 
         # =================================================================
         # Step 2: Export to deeph_out/
@@ -101,6 +113,8 @@ try:
             hamiltonian=H_aimspy,
             overlap=S_aimspy,
             initial_hamiltonian=h_init_aimspy,
+            force=forces_aimspy,
+            energy=energy_hartree,
         )
         _info(f"  DeepHData: {dd}")
         _info(f"  n_basis: {dd.n_basis}")
@@ -110,6 +124,9 @@ try:
         _info(
             f"  initial_hamiltonian_entries: {'present' if dd.initial_hamiltonian_entries is not None else 'None'}"
         )
+        if dd.force is not None:
+            _info(f"  force:   shape={dd.force.shape}, POSCAR order")
+            _info(f"  energy_eV: {dd.energy_eV:.6f} eV")
 
         DEEPH_OUT.mkdir(parents=True, exist_ok=True)
         dd.save(DEEPH_OUT)
@@ -186,6 +203,66 @@ try:
             )
         else:
             _info("  H_init entries: None")
+            all_ok = False
+
+        # -- 3c. force.h5 cross-validation --
+        _info("")
+        _info("-- force.h5 (force + energy) --")
+        if forces_aimspy is not None and dd.force is not None:
+            # force.h5 file exists on disk
+            force_h5_path = DEEPH_OUT / "force.h5"
+            all_ok &= _ok(
+                "force.h5 file exists", force_h5_path.is_file(), str(force_h5_path)
+            )
+            if force_h5_path.is_file():
+                with h5py.File(force_h5_path, "r") as f:
+                    # Dataset checks
+                    all_ok &= _ok(
+                        "force.h5 has cell dataset",
+                        "cell" in f and f["cell"].shape == (3, 3),
+                    )
+                    all_ok &= _ok(
+                        "force.h5 has energy dataset",
+                        "energy" in f and f["energy"].shape == (),
+                    )
+                    all_ok &= _ok(
+                        "force.h5 has force dataset",
+                        "force" in f and f["force"].shape == (structure.n_atoms, 3),
+                    )
+                    all_ok &= _ok(
+                        "force.h5 has stress dataset",
+                        "stress" in f and f["stress"].shape == (6,),
+                    )
+                    # Attr checks
+                    all_ok &= _ok(
+                        "force.h5 has formula attr",
+                        "formula" in f.attrs and f.attrs["formula"] == b"X3",
+                    )
+                    all_ok &= _ok(
+                        "force.h5 has natoms attr",
+                        "natoms" in f.attrs and int(f.attrs["natoms"]) == 3,
+                    )
+                    # Energy value: Hartree → eV
+                    energy_eV_expected = energy_hartree * HARTREE_TO_EV
+                    energy_eV_disk = float(f["energy"][()])
+                    all_ok &= _ok(
+                        "force.h5 energy matches (Hartree→eV)",
+                        abs(energy_eV_disk - energy_eV_expected) < 1e-6,
+                        f"disk={energy_eV_disk:.6f} vs expected={energy_eV_expected:.6f}",
+                    )
+                    # Force values: reorder dd.force (POSCAR) → aims order, compare
+                    old2new, _ = structure.build_atom_permutation()
+                    force_back_to_aims = dd.force[old2new]
+                    force_disk = f["force"][:]
+                    force_disk_aims = force_disk[old2new]
+                    force_diff = np.max(np.abs(force_disk_aims - forces_aimspy))
+                    all_ok &= _ok(
+                        "force.h5 force matches (POSCAR→aims reorder)",
+                        force_diff < 1e-10,
+                        f"max|diff|={force_diff:.2e}",
+                    )
+        else:
+            _info("  forces not available — skipping force.h5 checks")
             all_ok = False
 
 finally:

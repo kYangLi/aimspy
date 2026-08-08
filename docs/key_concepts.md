@@ -237,10 +237,13 @@ some_directory/
 ├── info.json           # System metadata + basis set info
 ├── overlap.h5          # Overlap matrix S (sparse)
 ├── hamiltonian.h5      # Hamiltonian H (sparse, eV)
-└── hamiltonian_init.h5 # Free-atom initial Hamiltonian (sparse, eV)
+├── hamiltonian_init.h5 # Free-atom initial Hamiltonian (sparse, eV)
+└── force.h5            # (optional) Forces + energy (MD-style: cell/energy/force/stress)
 ```
 
-Each `.h5` file stores four datasets: `atom_pairs` `(N,5)`, `chunk_boundaries` `(N+1,)`, `chunk_shapes` `(N,2)`, and `entries` `(M,)`. The atom order in `POSCAR` is **element-grouped** (different from aims native order); `DeepHData` handles the reordering via `AimspyStructure.atom_permutation`.
+Each matrix `.h5` file stores four datasets: `atom_pairs` `(N,5)`, `chunk_boundaries` `(N+1,)`, `chunk_shapes` `(N,2)`, and `entries` `(M,)`. The atom order in `POSCAR` is **element-grouped** (different from aims native order); `DeepHData` handles the reordering via `AimspyStructure.atom_permutation`.
+
+`force.h5` uses a different MD-style layout: `cell` `(3,3)`, `energy` (scalar), `force` `(n_atoms,3)`, `stress` `(6,)` (zeros placeholder), with `formula` and `natoms` root attributes. Forces are in eV/Å (matching `calc.forces`), energy is in eV (converted from `calc.energy` Hartree).
 
 ### Unit conventions
 
@@ -249,8 +252,10 @@ Each `.h5` file stores four datasets: `atom_pairs` `(N,5)`, `chunk_boundaries` `
 | Hamiltonian | Hartree | eV |
 | Overlap | dimensionless | dimensionless |
 | Coordinates | Å | Å (in POSCAR) |
+| Force | eV/Å (`calc.forces`) | eV/Å (`force.h5`) |
+| Total energy | Hartree (`calc.energy`) | eV (`force.h5` `energy` dataset) |
 
-`DeepHData.from_memory` converts Hartree → eV on write; `DeepHData.to_aimspy` converts eV → Hartree on read.
+`DeepHData.from_memory` converts Hartree → eV on write; `DeepHData.to_aimspy` converts eV → Hartree on read. Force requires no unit conversion (eV/Å throughout); only atom reordering is applied. Energy in `force.h5` is converted from Hartree via `from_aimspy(force=, energy=)` or `set_force(force, structure, energy=)`.
 
 ## FHI-aims Patch System
 

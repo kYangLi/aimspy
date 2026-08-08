@@ -196,6 +196,11 @@ copied automatically).
 Add `compute_forces .true.` to your `control.in` to enable force
 calculation.
 
+When exporting to DeepH format, passing `force=calc.forces` while `calc.forces`
+is `None` will raise `AimspyConfigError` (invalid force shape). Either enable
+`compute_forces` in `control.in`, or simply omit the `force=` argument —
+`DeepHData.from_aimspy(...)` works without forces.
+
 ### Matrix extraction/injection requires periodic systems
 
 Forward SCF calculations work with any system type. However, extracting

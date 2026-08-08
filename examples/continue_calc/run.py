@@ -69,3 +69,7 @@ with calc:
     if rank == 0:
         print(f"[warmstart] energy = {calc.energy:.6f} Hartree")
         print("[warmstart] SCF should have converged in 1 iteration")
+        if calc.forces is not None:
+            print(f"[warmstart] forces (eV/Å):\n{calc.forces}")
+        else:
+            print("[warmstart] forces not available (compute_forces not set)")

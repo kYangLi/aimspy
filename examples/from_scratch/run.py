@@ -63,7 +63,14 @@ with Calculator(config) as calc:
 if rank == 0:
     out_dir = Path(__file__).resolve().parent / "deeph_data"
     data_mgr = DeepHData.from_aimspy(
-        structure=R, hamiltonian=H, overlap=S, initial_hamiltonian=H_init
+        structure=R,
+        hamiltonian=H,
+        overlap=S,
+        initial_hamiltonian=H_init,
+        force=F,  # eV/Å, aims order → auto-reordered to POSCAR
+        energy=E,  # Hartree → auto-converted to eV
     )
     data_mgr.save(out_dir)
     print(f"[info] DeepH data saved to {out_dir}")
+    print(f"[info]   force.h5: {data_mgr.force.shape[0]} atoms")
+    print(f"[info]   energy:   {data_mgr.energy_eV:.6f} eV")

@@ -273,6 +273,8 @@ class DeepHData:
       - ``hamiltonian_init.h5`` — *optional* — same layout, initial Hamiltonian
         entries (the ``0`` in the filename denotes the initial Hamiltonian,
         per DeepH on-disk convention)
+      - ``force.h5``        — *optional* — MD-style: cell, energy, force,
+        stress datasets (energy in eV, force in eV/Å, stress as zeros)
 
     Can also be constructed in-memory via ``from_memory`` or from
     aimspy standard-format matrices via ``from_aimspy``.
@@ -296,6 +298,10 @@ class DeepHData:
     overlap_entries: Optional[np.ndarray] = None
     initial_hamiltonian_entries: Optional[np.ndarray] = None
 
+    # force / energy (optional, for MD-style force.h5 export)
+    force: Optional[np.ndarray] = None  # (n_atoms, 3) float64, eV/Å, POSCAR order
+    energy_eV: Optional[float] = None  # scalar, eV
+
     # metadata (for info.json round-trip)
     fermi_energy_eV: float = 0.0
 
@@ -311,7 +317,8 @@ class DeepHData:
 
         Requires POSCAR + info.json + at least one matrix file
         (``hamiltonian.h5``, ``overlap.h5``, or ``hamiltonian_init.h5``).
-        Sets ``self.path = path`` for subsequent ``save_*()`` calls.
+        Optionally reads ``force.h5`` (MD-style format: cell/energy/force/stress)
+        if present.  Sets ``self.path = path`` for subsequent ``save_*()`` calls.
         """
         path = Path(path)
         if not path.is_dir():
@@ -368,6 +375,22 @@ class DeepHData:
             elif name == "initial_hamiltonian":
                 init_entries = data
 
+        # Check for optional force.h5 (different format from matrix .h5)
+        force_path = path / "force.h5"
+        force_arr = None
+        energy_val = None
+        if force_path.is_file():
+            with h5py.File(force_path, "r") as f:
+                force_arr = f["force"][:].astype(np.float64)
+                if "energy" in f:
+                    energy_val = float(f["energy"][()])
+            expected_shape = (len(atom_symbols), 3)
+            if force_arr.shape != expected_shape:
+                raise AimspyConfigError(
+                    f"force.h5: force shape {force_arr.shape} doesn't match "
+                    f"expected {expected_shape}"
+                )
+
         return cls(
             lattice=lattice,
             atom_symbols=atom_symbols,
@@ -380,6 +403,8 @@ class DeepHData:
             entries=entries,
             overlap_entries=overlap_entries,
             initial_hamiltonian_entries=init_entries,
+            force=force_arr,
+            energy_eV=energy_val,
             fermi_energy_eV=fermi_eV,
             path=path,
         )
@@ -396,6 +421,8 @@ class DeepHData:
         initial_hamiltonian_blocks: Optional[dict[tuple[int, ...], np.ndarray]] = None,
         n_basis: int = 0,
         fermi_energy_eV: float = 0.0,
+        force: Optional[np.ndarray] = None,
+        energy_eV: Optional[float] = None,
         path: Optional[Union[str, Path]] = None,
     ) -> "DeepHData":
         """Build from in-memory pair-block dicts.
@@ -404,6 +431,11 @@ class DeepHData:
         Keys are ``(R1,R2,R3,i,j)`` with atoms in POSCAR order.
         Hamiltonian / initial_hamiltonian blocks in **Hartree**
         (converted to eV here). Overlap blocks are dimensionless.
+
+        *force* and *energy_eV* are optional per-atom / scalar data for
+        MD-style ``force.h5`` export. *force* is ``(n_atoms, 3)`` in
+        eV/Å, already in **POSCAR atom order** (matching *atom_coords*).
+        *energy_eV* is a scalar in eV.
         """
         if n_basis == 0:
             n_basis = _compute_n_basis(atom_symbols, elements_orbital_map)
@@ -463,6 +495,16 @@ class DeepHData:
             init = np.concatenate(init_ham_lst)
             init *= HARTREE_TO_EV  # Hartree → eV
 
+        # Validate force shape if provided
+        if force is not None:
+            force = np.asarray(force, dtype=np.float64)
+            expected_shape = (len(atom_symbols), 3)
+            if force.shape != expected_shape:
+                raise AimspyConfigError(
+                    f"force shape {force.shape} doesn't match "
+                    f"expected {expected_shape}"
+                )
+
         return cls(
             lattice=np.asarray(lattice, dtype=np.float64),
             atom_symbols=list(atom_symbols),
@@ -475,6 +517,8 @@ class DeepHData:
             entries=entries,
             overlap_entries=ovlp,
             initial_hamiltonian_entries=init,
+            force=force,
+            energy_eV=energy_eV,
             fermi_energy_eV=fermi_energy_eV,
             path=Path(path) if path is not None else None,
         )
@@ -491,6 +535,8 @@ class DeepHData:
         initial_hamiltonian=None,
         template: Optional["DeepHData"] = None,
         path: Optional[Union[str, Path]] = None,
+        force: Optional[np.ndarray] = None,
+        energy: Optional[float] = None,
     ) -> "DeepHData":
         """Build from aimspy standard-format matrices + structure.
 
@@ -513,6 +559,17 @@ class DeepHData:
             existing DeepH dataset.
         path : str or Path, optional
             Pre-specified save path for subsequent ``save_*()`` calls.
+        force : np.ndarray, optional
+            Forces ``(n_atoms, 3)`` in eV/Å, **aims atom order**.
+            Reordered to POSCAR order inside.
+        energy : float, optional
+            Total energy in **Hartree** (converted to eV inside).
+
+        .. note::
+
+            *force* and *energy* are keyword-only (placed after *path*)
+            to preserve backward-compatible positional ordering of
+            *template*.
         """
         if hamiltonian is None and overlap is None and initial_hamiltonian is None:
             raise AimspyConfigError("At least one matrix must be provided")
@@ -548,6 +605,21 @@ class DeepHData:
             else None
         )
 
+        # Force: reorder aims → POSCAR (force is per-atom, not block dict)
+        force_poscar = None
+        if force is not None:
+            _, new2old = structure.build_atom_permutation()
+            force_arr = np.asarray(force, dtype=np.float64)
+            if force_arr.shape != (structure.n_atoms, 3):
+                raise AimspyConfigError(
+                    f"force shape {force_arr.shape} doesn't match "
+                    f"expected ({structure.n_atoms}, 3)"
+                )
+            force_poscar = np.ascontiguousarray(force_arr[new2old])
+
+        # Energy: Hartree → eV
+        energy_eV_val = float(energy) * HARTREE_TO_EV if energy is not None else None
+
         return cls.from_memory(
             lattice=lattice,
             atom_symbols=atom_symbols,
@@ -558,6 +630,8 @@ class DeepHData:
             initial_hamiltonian_blocks=initial_hamiltonian_blocks,
             n_basis=n_basis,
             fermi_energy_eV=fermi_eV,
+            force=force_poscar,
+            energy_eV=energy_eV_val,
             path=path,
         )
 
@@ -600,6 +674,35 @@ class DeepHData:
             factor=HARTREE_TO_EV,
         )
 
+    def set_force(
+        self,
+        force_aims: np.ndarray,
+        structure: "AimspyStructure",
+        energy: Optional[float] = None,
+    ) -> None:
+        """Store force (eV/Å) and optionally energy (Hartree→eV) from aims order.
+
+        Parameters
+        ----------
+        force_aims : np.ndarray or list
+            Forces ``(n_atoms, 3)`` in eV/Å, **aims atom order**.
+            Reordered to POSCAR order inside.  Accepts list or ndarray.
+        structure : AimspyStructure
+            Provides the aims→POSCAR atom permutation.
+        energy : float, optional
+            Total energy in **Hartree** (converted to eV), or None.
+        """
+        force_arr = np.asarray(force_aims, dtype=np.float64)
+        if force_arr.shape != (structure.n_atoms, 3):
+            raise AimspyConfigError(
+                f"force shape {force_arr.shape} doesn't match "
+                f"expected ({structure.n_atoms}, 3)"
+            )
+        _, new2old = structure.build_atom_permutation()
+        self.force = np.ascontiguousarray(force_arr[new2old])
+        if energy is not None:
+            self.energy_eV = float(energy) * HARTREE_TO_EV
+
     # ----------------------------------------------------------------
     # Save individual matrices / metadata
     # ----------------------------------------------------------------
@@ -616,6 +719,25 @@ class DeepHData:
             f.create_dataset("chunk_boundaries", data=self.chunk_boundaries, dtype="i4")
             f.create_dataset("chunk_shapes", data=self.chunk_shapes, dtype="i4")
             f.create_dataset("entries", data=entries)
+
+    def _write_force_h5(self, file_path: Path) -> None:
+        """Write force.h5 in DeepH MD convention.
+
+        Datasets: ``cell`` (3,3), ``energy`` scalar, ``force`` (n_atoms,3),
+        ``stress`` (6,) zeros placeholder.
+        Root attrs: ``formula`` = ``b'X{natoms}'``, ``natoms`` = int64.
+
+        ``energy`` is written as 0.0 if ``energy_eV`` is None.
+        """
+        n_atoms = self.n_atoms
+        energy_val = float(self.energy_eV) if self.energy_eV is not None else 0.0
+        with h5py.File(file_path, "w") as f:
+            f.create_dataset("cell", data=self.lattice, dtype="f8")
+            f.create_dataset("energy", data=energy_val)
+            f.create_dataset("force", data=self.force, dtype="f8")
+            f.create_dataset("stress", data=np.zeros(6, dtype=np.float64))
+            f.attrs["formula"] = np.bytes_(f"X{n_atoms}".encode("utf-8"))
+            f.attrs["natoms"] = np.int64(n_atoms)
 
     def save_metadata(self, path: Optional[Union[str, Path]] = None) -> None:
         """Write POSCAR + info.json to *path* (default: self.path)."""
@@ -650,6 +772,18 @@ class DeepHData:
             p / "hamiltonian_init.h5", self.initial_hamiltonian_entries
         )
 
+    def save_force(self, path: Optional[Union[str, Path]] = None) -> None:
+        """Write force.h5 (requires force to be set).
+
+        Energy is written if ``energy_eV`` is set, else 0.0.
+        Stress is always written as zeros (placeholder).
+        """
+        if self.force is None:
+            raise AimspyConfigError("No force data to save")
+        p = Path(path) if path is not None else self._require_path()
+        p.mkdir(parents=True, exist_ok=True)
+        self._write_force_h5(p / "force.h5")
+
     def save(self, path: Optional[Union[str, Path]] = None) -> None:
         """Write all non-None content to *path* (default: self.path).
 
@@ -663,6 +797,8 @@ class DeepHData:
             self.save_overlap(p)
         if self.initial_hamiltonian_entries is not None:
             self.save_initial_hamiltonian(p)
+        if self.force is not None:
+            self.save_force(p)
 
     @property
     def n_pairs(self) -> int:
@@ -680,6 +816,8 @@ class DeepHData:
             extra.append("+S")
         if self.initial_hamiltonian_entries is not None:
             extra.append("+H_init")
+        if self.force is not None:
+            extra.append("+F")
         tag = " ".join(extra)
         return (
             f"DeepHData(n_atoms={self.n_atoms}, n_pairs={self.n_pairs}"
@@ -703,6 +841,13 @@ class DeepHData:
 
         The result is suitable for passing to
         :meth:`aimspy.Calculator.modify_init_ham` via ``source=``.
+
+        .. note::
+
+            Only the Hamiltonian is converted.  Force and energy (if
+            loaded from ``force.h5``) are accessible directly via the
+            ``self.force`` and ``self.energy_eV`` attributes — they do
+            **not** participate in the warmstart injection path.
 
         Parameters
         ----------
