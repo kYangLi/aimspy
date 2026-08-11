@@ -42,7 +42,7 @@ from .calculator import (
     Strategy,
 )
 from ._callbacks.registry import CallbackName
-from .interface import ExternalMatrixSource
+from .interface import ExternalMatrixSource, ExternalFirstOrderMatrixSource
 from .interface.deeph import DeepHData
 from .data import (
     AimspyInfo,
@@ -86,6 +86,7 @@ __all__ = [
     "DeepHData",
     "EV_TO_HARTREE",
     "ExternalMatrixSource",
+    "ExternalFirstOrderMatrixSource",
     "get_rs_hamiltonian",
     "get_rs_overlap",
     "get_forces",

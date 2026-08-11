@@ -238,6 +238,52 @@ class CallbackManager:
                 except Exception as exc:
                     _record_callback_error(errors, spec.name, exc)
 
+        elif spec.name == "export_dHde":
+
+            def wrapper(
+                aux_ptr: int,
+                mx_ptr: int,
+                n_ham: int,
+                n_dir: int,
+                n_spin: int,
+                j_coord: int,
+            ) -> None:
+                _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
+                try:
+                    # Fortran (n_dir, 1, n_ham, n_spin) column-major flat
+                    # → C-order (n_spin, n_ham, n_dir) — copy for safety
+                    # (DFPT_first_order_H_sparse may be reallocated by Fortran
+                    # after the callback returns; a view would dangle)
+                    size = int(n_ham) * int(n_dir) * int(n_spin)
+                    flat = np.ctypeslib.as_array(mx_ptr, shape=(size,)).copy()
+                    dHde = flat.reshape((int(n_spin), int(n_ham), int(n_dir)))
+                    fn(_aux, dHde, int(n_ham), int(n_dir), int(n_spin), int(j_coord))
+                except Exception as exc:
+                    _record_callback_error(errors, spec.name, exc)
+
+        elif spec.name == "modify_dHde":
+
+            def wrapper(
+                aux_ptr: int,
+                input_mx_ptr: int,
+                mx_ptr: int,
+                n_ham: int,
+                n_dir: int,
+                n_spin: int,
+                j_coord: int,
+            ) -> None:
+                _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
+                try:
+                    # mx_ptr is a POINTER(c_double) into Fortran intent(inout)
+                    # array DFPT_first_order_H_sparse.  We pass it as an integer
+                    # address so the callback can memmove into it directly.
+                    from ctypes import addressof
+
+                    addr = addressof(mx_ptr.contents) if mx_ptr else 0
+                    fn(_aux, addr, int(n_ham), int(n_dir), int(n_spin), int(j_coord))
+                except Exception as exc:
+                    _record_callback_error(errors, spec.name, exc)
+
         else:
             # Generic fallback: pass unpacked aux only
             def wrapper(aux_ptr: int, *rest) -> None:

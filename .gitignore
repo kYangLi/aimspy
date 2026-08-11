@@ -5,7 +5,11 @@
 *.h5
 tests/data/MoS2/deeph_out/
 tests/data/MoS2/_regression_*/
+tests/data/MoS2_DFFT/deeph_dHde_out/
+tests/data/MoS2_DFFT/*.dat
+tests/data/MoS2_DFFT/*.npy
 examples/*/deeph_data/
+examples/*/deeph_*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

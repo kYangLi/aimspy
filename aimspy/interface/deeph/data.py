@@ -258,6 +258,51 @@ def _compute_occupation(atom_symbols: list[str]) -> int:
     return sum(_ATOMIC_NUMBERS.get(s, 0) for s in atom_symbols)
 
 
+# DeepH direction order: [y, z, x] = indices [1, 2, 0] into Cartesian [x, y, z]
+_DIR_DEEPH_FROM_CART = [1, 2, 0]
+
+
+def _build_first_order_entries(
+    blocks_list: list[dict[tuple[int, ...], np.ndarray]],
+    atom_pairs: np.ndarray,
+    chunk_shapes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build first-order Hamiltonian entries + chunk layout from 3 block dicts.
+
+    *blocks_list* is a list of 3 block dicts in **Cartesian** order
+    ``[x, y, z]`` (Hartree). Returns ``(entries, fo_cb, fo_cs)`` where
+    entries are in eV (Hartree→eV converted) and ``fo_cs`` rows are
+    3× expanded (``[3*n_rows, n_cols]`` per pair). The three directions
+    are concatenated per atom pair in DeepH order ``[y, z, x]``.
+    """
+    n_pairs = atom_pairs.shape[0]
+    # Reorder to DeepH [y, z, x]
+    fo_blocks_deeph = [blocks_list[d] for d in _DIR_DEEPH_FROM_CART]
+    fo_cs = np.zeros((n_pairs, 2), dtype=np.int32)
+    fo_cb = np.zeros((n_pairs + 1,), dtype=np.int32)
+    fo_lst: list[np.ndarray] = []
+    for ip in range(n_pairs):
+        nr = int(chunk_shapes[ip, 0])
+        nc = int(chunk_shapes[ip, 1])
+        key = tuple(int(x) for x in atom_pairs[ip])
+        blocks_deeph = []
+        for d in range(3):
+            blk = fo_blocks_deeph[d].get(key)
+            if blk is None:
+                blocks_deeph.append(np.zeros((nr, nc), dtype=np.float64))
+            else:
+                blocks_deeph.append(np.ascontiguousarray(blk, dtype=np.float64))
+        # Concatenate [Hy, Hz, Hx] along rows → (3*nr, nc)
+        concat = np.concatenate(blocks_deeph, axis=0)
+        fo_lst.append(concat.ravel())
+        fo_cs[ip, 0] = 3 * nr
+        fo_cs[ip, 1] = nc
+        fo_cb[ip + 1] = fo_cb[ip] + 3 * nr * nc
+    entries = np.concatenate(fo_lst)
+    entries *= HARTREE_TO_EV  # Hartree → eV
+    return entries, fo_cb, fo_cs
+
+
 # =============================================================================
 # DeepHData
 # =============================================================================
@@ -297,6 +342,17 @@ class DeepHData:
     # optional additional matrices
     overlap_entries: Optional[np.ndarray] = None
     initial_hamiltonian_entries: Optional[np.ndarray] = None
+
+    # Electric-response first-order Hamiltonian (dH/de) entries (eV).
+    # DeepH ``electric_response.h5`` layout: 3 stacked Hamiltonians per
+    # atom pair — one per Cartesian direction (y, z, x = m=-1, 0, +1).
+    # ``_fo_chunk_*`` describe the 3×-expanded layout (kept in sync with
+    # the standard ``chunk_*`` via :meth:`set_first_order_hamiltonian` /
+    # :meth:`from_directory`); they are ``None`` when no first-order data
+    # is present.
+    first_order_hamiltonian_entries: Optional[np.ndarray] = None
+    _fo_chunk_boundaries: Optional[np.ndarray] = None
+    _fo_chunk_shapes: Optional[np.ndarray] = None
 
     # force / energy (optional, for MD-style force.h5 export)
     force: Optional[np.ndarray] = None  # (n_atoms, 3) float64, eV/Å, POSCAR order
@@ -391,6 +447,18 @@ class DeepHData:
                     f"expected {expected_shape}"
                 )
 
+        # Check for optional electric_response.h5 (dH/de, same atom_pairs as
+        # hamiltonian.h5 but chunk_shapes/boundaries expanded 3× per pair).
+        fo_path = path / "electric_response.h5"
+        fo_entries = None
+        fo_cb = None
+        fo_cs = None
+        if fo_path.is_file():
+            with h5py.File(fo_path, "r") as f:
+                fo_entries = f["entries"][:].astype(np.float64)
+                fo_cb = f["chunk_boundaries"][:].astype(np.int32)
+                fo_cs = f["chunk_shapes"][:].astype(np.int32)
+
         return cls(
             lattice=lattice,
             atom_symbols=atom_symbols,
@@ -403,6 +471,9 @@ class DeepHData:
             entries=entries,
             overlap_entries=overlap_entries,
             initial_hamiltonian_entries=init_entries,
+            first_order_hamiltonian_entries=fo_entries,
+            _fo_chunk_boundaries=fo_cb,
+            _fo_chunk_shapes=fo_cs,
             force=force_arr,
             energy_eV=energy_val,
             fermi_energy_eV=fermi_eV,
@@ -423,6 +494,9 @@ class DeepHData:
         fermi_energy_eV: float = 0.0,
         force: Optional[np.ndarray] = None,
         energy_eV: Optional[float] = None,
+        first_order_hamiltonian_blocks: Optional[
+            list[dict[tuple[int, ...], np.ndarray]]
+        ] = None,
         path: Optional[Union[str, Path]] = None,
     ) -> "DeepHData":
         """Build from in-memory pair-block dicts.
@@ -436,11 +510,24 @@ class DeepHData:
         MD-style ``force.h5`` export. *force* is ``(n_atoms, 3)`` in
         eV/Å, already in **POSCAR atom order** (matching *atom_coords*).
         *energy_eV* is a scalar in eV.
+
+        *first_order_hamiltonian_blocks* is an optional list of 3 block
+        dicts ``[x, y, z]`` in **Hartree** (converted to eV here). The
+        three directions are concatenated per atom pair in DeepH order
+        ``[y, z, x]`` (= real spherical harmonics ``m = -1, 0, +1``) and
+        stored in :attr:`first_order_hamiltonian_entries`.
         """
         if n_basis == 0:
             n_basis = _compute_n_basis(atom_symbols, elements_orbital_map)
         layout_blocks = (
-            hamiltonian_blocks or overlap_blocks or initial_hamiltonian_blocks
+            hamiltonian_blocks
+            or overlap_blocks
+            or initial_hamiltonian_blocks
+            or (
+                first_order_hamiltonian_blocks[0]
+                if first_order_hamiltonian_blocks is not None
+                else None
+            )
         )
         if layout_blocks is None:
             raise AimspyConfigError("At least one matrix blocks dict must be provided")
@@ -505,6 +592,26 @@ class DeepHData:
                     f"expected {expected_shape}"
                 )
 
+        # Optional first-order Hamiltonian (dH/de) — 3 block dicts [x, y, z].
+        # Stored in DeepH order [y, z, x] (= m = -1, 0, +1) per atom pair.
+        fo_entries = None
+        fo_cb = None
+        fo_cs = None
+        if first_order_hamiltonian_blocks is not None:
+            if (
+                not isinstance(first_order_hamiltonian_blocks, (list, tuple))
+                or len(first_order_hamiltonian_blocks) != 3
+            ):
+                raise AimspyConfigError(
+                    "first_order_hamiltonian_blocks must be a list of 3 dicts "
+                    "[x, y, z]"
+                )
+            fo_entries, fo_cb, fo_cs = _build_first_order_entries(
+                first_order_hamiltonian_blocks,
+                atom_pairs,
+                chunk_shapes,
+            )
+
         return cls(
             lattice=np.asarray(lattice, dtype=np.float64),
             atom_symbols=list(atom_symbols),
@@ -517,6 +624,9 @@ class DeepHData:
             entries=entries,
             overlap_entries=ovlp,
             initial_hamiltonian_entries=init,
+            first_order_hamiltonian_entries=fo_entries,
+            _fo_chunk_boundaries=fo_cb,
+            _fo_chunk_shapes=fo_cs,
             force=force,
             energy_eV=energy_eV,
             fermi_energy_eV=fermi_energy_eV,
@@ -537,6 +647,7 @@ class DeepHData:
         path: Optional[Union[str, Path]] = None,
         force: Optional[np.ndarray] = None,
         energy: Optional[float] = None,
+        first_order_hamiltonian: Optional[list] = None,
     ) -> "DeepHData":
         """Build from aimspy standard-format matrices + structure.
 
@@ -564,14 +675,24 @@ class DeepHData:
             Reordered to POSCAR order inside.
         energy : float, optional
             Total energy in **Hartree** (converted to eV inside).
+        first_order_hamiltonian : list[AimspyMatrix], optional
+            Electric-response first-order Hamiltonian ``dH/de`` — a list
+            of 3 ``AimspyMatrix`` in Cartesian order ``[x, y, z]``
+            (Hartree, aims atom order). Reordered to POSCAR order and
+            concatenated per atom pair in DeepH order ``[y, z, x]``.
 
         .. note::
 
-            *force* and *energy* are keyword-only (placed after *path*)
-            to preserve backward-compatible positional ordering of
-            *template*.
+            *force*, *energy* and *first_order_hamiltonian* are
+            keyword-only (placed after *path*) to preserve
+            backward-compatible positional ordering of *template*.
         """
-        if hamiltonian is None and overlap is None and initial_hamiltonian is None:
+        if (
+            hamiltonian is None
+            and overlap is None
+            and initial_hamiltonian is None
+            and first_order_hamiltonian is None
+        ):
             raise AimspyConfigError("At least one matrix must be provided")
         if template is not None:
             lattice = template.lattice.copy()
@@ -605,6 +726,22 @@ class DeepHData:
             else None
         )
 
+        # First-order Hamiltonian: list of 3 AimspyMatrix [x, y, z].
+        first_order_blocks_list = None
+        if first_order_hamiltonian is not None:
+            if (
+                not isinstance(first_order_hamiltonian, (list, tuple))
+                or len(first_order_hamiltonian) != 3
+            ):
+                raise AimspyConfigError(
+                    "first_order_hamiltonian must be a list of 3 AimspyMatrix "
+                    "[x, y, z]"
+                )
+            first_order_blocks_list = [
+                _aimspy_blocks_to_poscar(mx, structure)
+                for mx in first_order_hamiltonian
+            ]
+
         # Force: reorder aims → POSCAR (force is per-atom, not block dict)
         force_poscar = None
         if force is not None:
@@ -632,6 +769,7 @@ class DeepHData:
             fermi_energy_eV=fermi_eV,
             force=force_poscar,
             energy_eV=energy_eV_val,
+            first_order_hamiltonian_blocks=first_order_blocks_list,
             path=path,
         )
 
@@ -702,6 +840,40 @@ class DeepHData:
         self.force = np.ascontiguousarray(force_arr[new2old])
         if energy is not None:
             self.energy_eV = float(energy) * HARTREE_TO_EV
+
+    def set_first_order_hamiltonian(
+        self,
+        matrix_list: list,
+        structure: "AimspyStructure",
+    ) -> None:
+        """Store electric-response first-order Hamiltonian (dH/de) entries.
+
+        Converts 3 ``AimspyMatrix`` instances (Hartree, aims atom order)
+        into DeepH ``electric_response.h5`` entries (eV, POSCAR order).
+        The three Cartesian directions ``[x, y, z]`` are concatenated
+        per atom pair in DeepH order ``[y, z, x]`` (= real spherical
+        harmonics ``m = -1, 0, +1``), matching ``ref/aims_to_deeph.py``.
+
+        Parameters
+        ----------
+        matrix_list : list[AimspyMatrix]
+            Exactly 3 ``AimspyMatrix`` in Cartesian order ``[x, y, z]``.
+        structure : AimspyStructure
+            Provides the aims→POSCAR atom permutation.
+        """
+        if not isinstance(matrix_list, (list, tuple)) or len(matrix_list) != 3:
+            raise AimspyConfigError(
+                "matrix_list must contain exactly 3 AimspyMatrix [x, y, z]"
+            )
+        blocks_list = [_aimspy_blocks_to_poscar(mx, structure) for mx in matrix_list]
+        entries, fo_cb, fo_cs = _build_first_order_entries(
+            blocks_list,
+            self.atom_pairs,
+            self.chunk_shapes,
+        )
+        self.first_order_hamiltonian_entries = entries
+        self._fo_chunk_boundaries = fo_cb
+        self._fo_chunk_shapes = fo_cs
 
     # ----------------------------------------------------------------
     # Save individual matrices / metadata
@@ -784,6 +956,27 @@ class DeepHData:
         p.mkdir(parents=True, exist_ok=True)
         self._write_force_h5(p / "force.h5")
 
+    def save_first_order_hamiltonian(
+        self, path: Optional[Union[str, Path]] = None
+    ) -> None:
+        """Write ``electric_response.h5`` (requires first_order entries set).
+
+        Layout: same ``atom_pairs`` as ``hamiltonian.h5``, but
+        ``chunk_shapes`` rows are 3× (one block per Cartesian direction
+        ``[y, z, x]``) and ``entries`` is 3× longer.
+        """
+        if self.first_order_hamiltonian_entries is None:
+            raise AimspyConfigError("No first_order_hamiltonian entries to save")
+        p = Path(path) if path is not None else self._require_path()
+        p.mkdir(parents=True, exist_ok=True)
+        with h5py.File(p / "electric_response.h5", "w") as f:
+            f.create_dataset("atom_pairs", data=self.atom_pairs, dtype="i4")
+            f.create_dataset(
+                "chunk_boundaries", data=self._fo_chunk_boundaries, dtype="i4"
+            )
+            f.create_dataset("chunk_shapes", data=self._fo_chunk_shapes, dtype="i4")
+            f.create_dataset("entries", data=self.first_order_hamiltonian_entries)
+
     def save(self, path: Optional[Union[str, Path]] = None) -> None:
         """Write all non-None content to *path* (default: self.path).
 
@@ -797,6 +990,8 @@ class DeepHData:
             self.save_overlap(p)
         if self.initial_hamiltonian_entries is not None:
             self.save_initial_hamiltonian(p)
+        if self.first_order_hamiltonian_entries is not None:
+            self.save_first_order_hamiltonian(p)
         if self.force is not None:
             self.save_force(p)
 
@@ -816,6 +1011,8 @@ class DeepHData:
             extra.append("+S")
         if self.initial_hamiltonian_entries is not None:
             extra.append("+H_init")
+        if self.first_order_hamiltonian_entries is not None:
+            extra.append("+dHde")
         if self.force is not None:
             extra.append("+F")
         tag = " ".join(extra)
@@ -891,6 +1088,86 @@ class DeepHData:
             blocks[key] = block
 
         return AimspyMatrix(blocks=blocks, n_spin=1)
+
+    def to_first_order_aimspy(self, structure: "AimspyStructure") -> list:
+        """Convert this DeepH data's first-order Hamiltonian entries to
+        aimspy standard format.
+
+        Returns a list of 3 ``AimspyMatrix`` in Cartesian order
+        ``[x, y, z]`` (Hartree, aims atom order), suitable for passing
+        to :meth:`aimspy.Calculator.modify_init_first_order_ham` via
+        ``source=``.
+
+        - Atom reordering: POSCAR → aims (via stable-sort un-permutation)
+        - R: no flip (same convention: ``R_aimspy = R_deeph = -R_aims``)
+        - Parity: no change (same wiki convention)
+        - Units: eV → Hartree
+        - Direction order: DeepH ``[y, z, x]`` → ``[x, y, z]``
+
+        Parameters
+        ----------
+        structure : AimspyStructure
+            Live runtime structure (built from ``AimspyInfo`` after
+            ``aimspy_init``); provides the POSCAR↔aims atom permutation.
+        """
+        from ...matrix import AimspyMatrix
+
+        if self.first_order_hamiltonian_entries is None:
+            raise AimspyConfigError(
+                "No first_order_hamiltonian entries to convert; "
+                "set first_order_hamiltonian_entries first"
+            )
+        if self._fo_chunk_boundaries is None or self._fo_chunk_shapes is None:
+            raise AimspyConfigError(
+                "first_order chunk layout (_fo_chunk_boundaries/_fo_chunk_shapes) "
+                "is not set; use set_first_order_hamiltonian, from_memory, "
+                "or from_directory to establish the layout"
+            )
+        _, new2old = structure.build_atom_permutation()
+        # new2old[POSCAR_atom] = aims_atom
+
+        entries = self.first_order_hamiltonian_entries
+        fo_cb = self._fo_chunk_boundaries
+        fo_cs = self._fo_chunk_shapes
+
+        # Three blocks per atom pair, in DeepH order [y, z, x].
+        # Cartesian order [x, y, z] = indices [2, 0, 1] into DeepH order.
+        cart_idx = [2, 0, 1]
+        blocks_list: list[dict] = [{}, {}, {}]
+
+        for ip in range(self.n_pairs):
+            R1 = int(self.atom_pairs[ip, 0])
+            R2 = int(self.atom_pairs[ip, 1])
+            R3 = int(self.atom_pairs[ip, 2])
+            i_deeph = int(self.atom_pairs[ip, 3])
+            j_deeph = int(self.atom_pairs[ip, 4])
+
+            i_aims = int(new2old[i_deeph])
+            j_aims = int(new2old[j_deeph])
+
+            bnd = int(fo_cb[ip])
+            nr3 = int(fo_cs[ip, 0])  # 3 * n_rows
+            nc = int(fo_cs[ip, 1])
+            if nr3 % 3 != 0:
+                raise AimspyConfigError(
+                    f"first_order chunk_shapes[{ip}, 0] = {nr3} is not "
+                    f"divisible by 3 (corrupted electric_response.h5?)"
+                )
+            nr = nr3 // 3
+
+            chunk = entries[bnd : bnd + nr3 * nc].reshape(nr3, nc).copy()
+            # Split into 3 (nr, nc) blocks: [Hy, Hz, Hx]
+            sub_blocks = [chunk[d * nr : (d + 1) * nr, :].copy() for d in range(3)]
+            # Apply unit conversion eV → Hartree
+            for d in range(3):
+                sub_blocks[d] *= EV_TO_HARTREE
+
+            key = (R1, R2, R3, i_aims, j_aims)
+            for cart in range(3):
+                d_deeph = cart_idx[cart]
+                blocks_list[cart][key] = sub_blocks[d_deeph]
+
+        return [AimspyMatrix(blocks=blocks_list[cart], n_spin=1) for cart in range(3)]
 
 
 # -------------------------------------------------------------------

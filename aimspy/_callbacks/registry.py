@@ -16,6 +16,8 @@ from .._binding.callback_types import (
     ExportH0Cb,
     ModifyH0Cb,
     ReconstructMxCb,
+    ExportDHdeCb,
+    ModifyDHdeCb,
 )
 from .base import CallbackSpec
 
@@ -32,6 +34,8 @@ class CallbackName(Enum):
     EXPORT_H0 = "export_h0"
     MODIFY_H0 = "modify_h0"
     PYTHON_FUNC = "python_func"
+    EXPORT_DHDE = "export_dHde"
+    MODIFY_DHDE = "modify_dHde"
 
 
 # =========================================================================
@@ -77,6 +81,22 @@ CALLBACK_SPECS: list[CallbackSpec] = [
         register_arg_count=2,
         trigger_stage="pre_scf",
         fortran_module="initialize_scf.f90:915",
+    ),
+    CallbackSpec(
+        name="export_dHde",
+        ctypes_type=ExportDHdeCb,
+        register_symbol="aimspy_register_export_dHde_callback",
+        register_arg_count=2,
+        trigger_stage="post_cpscf",
+        fortran_module="DFPT_module.f90:1235",
+    ),
+    CallbackSpec(
+        name="modify_dHde",
+        ctypes_type=ModifyDHdeCb,
+        register_symbol="aimspy_register_modify_dHde_callback",
+        register_arg_count=3,
+        trigger_stage="pre_cpscf",
+        fortran_module="DFPT_module.f90:1098",
     ),
 ]
 

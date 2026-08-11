@@ -56,7 +56,7 @@ class TestCallbackName:
 
     def test_all_callback_names(self):
         names = [n.value for n in CallbackName]
-        assert len(names) == 5
+        assert len(names) == 7
 
     def test_register_callback_accepts_enum(self):
         """register_callback should accept CallbackName as well as str."""

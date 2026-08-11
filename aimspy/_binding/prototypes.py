@@ -15,6 +15,8 @@ from .callback_types import (
     ExportH0Cb,
     ModifyH0Cb,
     ReconstructMxCb,
+    ExportDHdeCb,
+    ModifyDHdeCb,
 )
 
 _log = logging.getLogger(__name__)
@@ -42,6 +44,12 @@ _PROTOTYPES: dict[str, tuple[list, object]] = {
     "aimspy_register_export_h0_callback": ([ExportH0Cb, c_void_p], None),
     "aimspy_register_modify_h0_callback": ([ModifyH0Cb, c_void_p, c_void_p], None),
     "aimspy_register_python_callback": ([ReconstructMxCb, c_void_p], None),
+    # ---- electric-response (DFPT) callbacks ----
+    "aimspy_register_export_dHde_callback": ([ExportDHdeCb, c_void_p], None),
+    "aimspy_register_modify_dHde_callback": (
+        [ModifyDHdeCb, c_void_p, c_void_p],
+        None,
+    ),
 }
 
 

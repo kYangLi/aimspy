@@ -656,3 +656,360 @@ class TestForce:
         dd.save()
         assert (tmp_path / "force.h5").exists()
         assert (tmp_path / "hamiltonian.h5").exists()
+
+
+# =============================================================================
+# Tests: first-order Hamiltonian (electric response)
+# =============================================================================
+def _make_three_first_order_blocks():
+    """3 block dicts [x, y, z] with 1x1 blocks each, Hartree units.
+
+    The values are chosen so each direction is distinguishable:
+    x=1.0, y=2.0, z=3.0 (Hartree).
+    """
+    base_key = (0, 0, 0, 0, 0)
+    return [
+        {base_key: np.array([[1.0]])},  # x
+        {base_key: np.array([[2.0]])},  # y
+        {base_key: np.array([[3.0]])},  # z
+    ]
+
+
+def _make_three_aimspy_matrices():
+    """3 AimspyMatrix [x, y, z] with 1 block each, Hartree units."""
+    return [
+        AimspyMatrix(blocks=blk, n_spin=1) for blk in _make_three_first_order_blocks()
+    ]
+
+
+class TestFirstOrderFromMemory:
+    def test_from_memory_first_order_basic(self):
+        fo_blocks = _make_three_first_order_blocks()
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            first_order_hamiltonian_blocks=fo_blocks,
+        )
+        assert dd.first_order_hamiltonian_entries is not None
+        assert dd._fo_chunk_boundaries is not None
+        assert dd._fo_chunk_shapes is not None
+        # 2 pairs × 3×(1×1) = 6 entries
+        assert dd.first_order_hamiltonian_entries.shape == (6,)
+        # Hartree → eV
+        HARTREE_TO_EV = 27.2113845
+        # _make_simple_blocks has 2 pairs: (0,0,0,0,0) and (0,0,0,0,1)
+        # fo_blocks only has key (0,0,0,0,0) → missing key (0,0,0,0,1) → zeros
+        # DeepH order [y, z, x] = [2.0, 3.0, 1.0] Hartree → eV for pair 0
+        # Pair 1 (missing) → zeros
+        expected_pair0 = np.array([2.0, 3.0, 1.0]) * HARTREE_TO_EV
+        expected_pair1 = np.zeros(3)
+        expected = np.concatenate([expected_pair0, expected_pair1])
+        np.testing.assert_allclose(dd.first_order_hamiltonian_entries, expected)
+        # chunk_shapes: 3×1 row, 1 col (both pairs)
+        assert dd._fo_chunk_shapes[0, 0] == 3
+        assert dd._fo_chunk_shapes[0, 1] == 1
+        # chunk_boundaries: [0, 3, 6]
+        np.testing.assert_array_equal(
+            dd._fo_chunk_boundaries, np.array([0, 3, 6], dtype=np.int32)
+        )
+
+    def test_from_memory_first_order_wrong_length_raises(self):
+        from aimspy import AimspyConfigError
+
+        fo_blocks = _make_three_first_order_blocks()[:2]  # only 2
+        with pytest.raises(AimspyConfigError, match="list of 3"):
+            DeepHData.from_memory(
+                lattice=np.eye(3) * 10.0,
+                atom_symbols=["Mo", "S", "S"],
+                atom_coords=np.zeros((3, 3)),
+                elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+                hamiltonian_blocks=_make_simple_blocks(),
+                first_order_hamiltonian_blocks=fo_blocks,
+            )
+
+
+class TestFirstOrderSet:
+    def test_set_first_order_hamiltonian(self):
+        struct = _make_mock_structure()
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+        )
+        mx_list = _make_three_aimspy_matrices()
+        dd.set_first_order_hamiltonian(mx_list, struct)
+        assert dd.first_order_hamiltonian_entries is not None
+        assert dd._fo_chunk_boundaries is not None
+        assert dd._fo_chunk_shapes is not None
+        # 2 pairs × 3×(1×1) = 6 entries
+        assert dd.first_order_hamiltonian_entries.shape == (6,)
+
+    def test_set_first_order_wrong_length_raises(self):
+        from aimspy import AimspyConfigError
+
+        struct = _make_mock_structure()
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+        )
+        mx_list = _make_three_aimspy_matrices()[:2]
+        with pytest.raises(AimspyConfigError, match="exactly 3"):
+            dd.set_first_order_hamiltonian(mx_list, struct)
+
+
+class TestFirstOrderFromAimspy:
+    def test_from_aimspy_first_order(self):
+        struct = _make_mock_structure()
+        mx_list = _make_three_aimspy_matrices()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            hamiltonian=AimspyMatrix(blocks=_make_simple_blocks(), n_spin=1),
+            first_order_hamiltonian=mx_list,
+        )
+        assert dd.first_order_hamiltonian_entries is not None
+        assert dd._fo_chunk_boundaries is not None
+        assert dd._fo_chunk_shapes is not None
+
+    def test_from_aimspy_first_order_wrong_length_raises(self):
+        from aimspy import AimspyConfigError
+
+        struct = _make_mock_structure()
+        mx_list = _make_three_aimspy_matrices()[:2]
+        with pytest.raises(AimspyConfigError, match="list of 3"):
+            DeepHData.from_aimspy(
+                structure=struct,
+                first_order_hamiltonian=mx_list,
+            )
+
+
+class TestFirstOrderSaveLoad:
+    def test_save_first_order(self, tmp_path):
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            first_order_hamiltonian_blocks=_make_three_first_order_blocks(),
+            path=tmp_path,
+        )
+        dd.save()
+        assert (tmp_path / "electric_response.h5").exists()
+        # Verify HDF5 contents
+        import h5py
+
+        with h5py.File(tmp_path / "electric_response.h5", "r") as f:
+            assert "atom_pairs" in f
+            assert "chunk_boundaries" in f
+            assert "chunk_shapes" in f
+            assert "entries" in f
+            entries = f["entries"][:]
+            # 2 pairs × 3 entries each = 6
+            assert entries.shape == (6,)
+
+    def test_from_directory_first_order(self, tmp_path):
+        # First save, then reload
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            first_order_hamiltonian_blocks=_make_three_first_order_blocks(),
+            path=tmp_path,
+        )
+        dd.save()
+        # Reload
+        dd2 = DeepHData.from_directory(tmp_path)
+        assert dd2.first_order_hamiltonian_entries is not None
+        assert dd2._fo_chunk_boundaries is not None
+        assert dd2._fo_chunk_shapes is not None
+        np.testing.assert_allclose(
+            dd2.first_order_hamiltonian_entries,
+            dd.first_order_hamiltonian_entries,
+        )
+
+    def test_save_first_order_without_entries_raises(self, tmp_path):
+        from aimspy import AimspyConfigError
+
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            path=tmp_path,
+        )
+        with pytest.raises(AimspyConfigError, match="No first_order"):
+            dd.save_first_order_hamiltonian()
+
+
+class TestFirstOrderToAimspy:
+    def test_to_first_order_aimspy_basic(self):
+        struct = _make_mock_structure()
+        mx_list = _make_three_aimspy_matrices()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            first_order_hamiltonian=mx_list,
+        )
+        # Convert back
+        result = dd.to_first_order_aimspy(struct)
+        assert isinstance(result, list)
+        assert len(result) == 3
+        for mx in result:
+            assert isinstance(mx, AimspyMatrix)
+            assert mx.n_spin == 1
+
+    def test_to_first_order_aimspy_roundtrip(self):
+        """Roundtrip: 3 AimspyMatrix → DeepHData → 3 AimspyMatrix.
+
+        The blocks should match (modulo atom reordering, but since we use
+        _make_mock_structure which has sorted atoms ["Mo","S","S"], the
+        permutation is identity).
+        """
+        struct = _make_mock_structure()
+        original = _make_three_aimspy_matrices()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            first_order_hamiltonian=original,
+        )
+        recovered = dd.to_first_order_aimspy(struct)
+        # Each recovered matrix should have the same blocks as the original
+        for cart in range(3):
+            orig_blocks = original[cart].blocks
+            recv_blocks = recovered[cart].blocks
+            assert set(orig_blocks.keys()) == set(recv_blocks.keys())
+            for key in orig_blocks:
+                np.testing.assert_allclose(
+                    recv_blocks[key], orig_blocks[key], atol=1e-10
+                )
+
+    def test_to_first_order_aimspy_without_entries_raises(self):
+        from aimspy import AimspyConfigError
+
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+        )
+        struct = _make_mock_structure()
+        with pytest.raises(AimspyConfigError, match="No first_order"):
+            dd.to_first_order_aimspy(struct)
+
+    def test_to_first_order_direction_order(self):
+        """Verify DeepH order [y, z, x] ↔ Cartesian order [x, y, z].
+
+        x=1.0, y=2.0, z=3.0 (Hartree). After conversion to DeepH entries
+        and back, the Cartesian order should be preserved.
+        """
+        struct = _make_mock_structure()
+        original = _make_three_aimspy_matrices()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            first_order_hamiltonian=original,
+        )
+        recovered = dd.to_first_order_aimspy(struct)
+        key = (0, 0, 0, 0, 0)
+        # x should be 1.0 Hartree, y=2.0, z=3.0
+        assert recovered[0].blocks[key][0, 0] == pytest.approx(1.0, abs=1e-10)
+        assert recovered[1].blocks[key][0, 0] == pytest.approx(2.0, abs=1e-10)
+        assert recovered[2].blocks[key][0, 0] == pytest.approx(3.0, abs=1e-10)
+
+
+class TestFirstOrderRepr:
+    def test_repr_with_first_order(self):
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            first_order_hamiltonian_blocks=_make_three_first_order_blocks(),
+        )
+        r = repr(dd)
+        assert "+dHde" in r
+
+
+class TestExternalFirstOrderMatrixSource:
+    def test_deeph_data_satisfies_protocol(self):
+        from aimspy import ExternalFirstOrderMatrixSource
+
+        struct = _make_mock_structure()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            first_order_hamiltonian=_make_three_aimspy_matrices(),
+        )
+        assert isinstance(dd, ExternalFirstOrderMatrixSource)
+
+
+class TestCalculatorFirstOrderConfig:
+    def test_config_capture_first_order_default(self):
+        from aimspy import CalculatorConfig
+
+        cfg = CalculatorConfig(lib_path="/tmp/x.so")
+        assert cfg.capture_first_order_hamiltonian is False
+
+    def test_config_capture_first_order_set(self):
+        from aimspy import CalculatorConfig
+
+        cfg = CalculatorConfig(
+            lib_path="/tmp/x.so", capture_first_order_hamiltonian=True
+        )
+        assert cfg.capture_first_order_hamiltonian is True
+
+    def test_modify_init_first_order_ham_direct(self):
+        from aimspy import Calculator, CalculatorConfig, Strategy
+
+        calc = Calculator(CalculatorConfig(lib_path="/tmp/x.so"))
+
+        # Use a dummy source (None is not allowed for direct mode, but
+        # we only test config storage, not actual callback firing).
+        # Create a minimal stub object with to_first_order_aimspy method.
+        class StubSource:
+            def to_first_order_aimspy(self, structure):
+                return []
+
+        calc.modify_init_first_order_ham(source=StubSource(), strategy=Strategy.REPLACE)
+        assert calc._modify_first_order is not None
+        assert calc._modify_first_order.strategy == Strategy.REPLACE
+
+    def test_modify_init_first_order_ham_invalid_strategy(self):
+        from aimspy import Calculator, CalculatorConfig, AimspyConfigError
+
+        calc = Calculator(CalculatorConfig(lib_path="/tmp/x.so"))
+        with pytest.raises(AimspyConfigError, match="only REPLACE and ADD"):
+            calc.modify_init_first_order_ham(strategy="custom")
+
+    def test_modify_init_first_order_ham_custom_raises(self):
+        from aimspy import Calculator, CalculatorConfig, AimspyConfigError
+
+        calc = Calculator(CalculatorConfig(lib_path="/tmp/x.so"))
+        with pytest.raises(AimspyConfigError, match="only REPLACE and ADD"):
+            calc.modify_init_first_order_ham(
+                strategy="custom", custom_fn=lambda *a: None
+            )
+
+    def test_modify_init_first_order_ham_deferred(self):
+        from aimspy import Calculator, CalculatorConfig, Strategy
+
+        calc = Calculator(CalculatorConfig(lib_path="/tmp/x.so"))
+
+        @calc.modify_init_first_order_ham(
+            strategy=Strategy.REPLACE, option={"path": "/tmp"}
+        )
+        def gen_source(view, option):
+            return None
+
+        assert calc._modify_first_order is not None
+        assert calc._modify_first_order.deferred_fn is gen_source
+        assert calc._modify_first_order.deferred_option == {"path": "/tmp"}

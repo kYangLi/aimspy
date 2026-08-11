@@ -14,10 +14,10 @@ sc_accuracy_eev          1e-6
 sc_accuracy_etot         1e-7 
 
 # DFPT
-#electric_field_response            DFPT
-#electric_field_serial              .false.
-#dfpt_mixer                         pulay
-#output                             dfpt_matrices
+electric_field_response            DFPT
+electric_field_serial              .false.
+dfpt_mixer                         pulay
+dfpt_sc_accuracy_dm                1.0d-5
 
 # Species defaults: 01_H_default
 ################################################################################

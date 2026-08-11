@@ -13,4 +13,7 @@ collect_ignore = [
     "test_regression.py",
     "test_export_deeph.py",
     "test_strategies.py",
+    "test_dHde_capture.py",
+    "test_dHde_inject_direct.py",
+    "test_dHde_inject_defer.py",
 ]

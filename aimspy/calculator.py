@@ -58,7 +58,7 @@ Capture free-atom initial Hamiltonian (optional)::
 from __future__ import annotations
 
 import logging
-from ctypes import memmove, sizeof, c_double
+from ctypes import memmove, sizeof, c_double, cast, c_void_p, POINTER
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -143,6 +143,11 @@ class CalculatorConfig:
         :attr:`Calculator.overlap` returns the live overlap matrix
         (available from ``INITED`` state onward, all MPI ranks) instead
         of the ``c_overlap`` copy (rank 0 only). Default False.
+    capture_first_order_hamiltonian : bool
+        If True, register the ``export_dHde`` callback so that
+        :attr:`Calculator.first_order_hamiltonian` is available after
+        ``calc()`` (requires ``electric_field_response DFPT`` in
+        control.in). Default False.
     """
 
     lib_path: Path | str
@@ -153,6 +158,7 @@ class CalculatorConfig:
     logfile: Path | str = Path("aims.out")
     capture_initial_hamiltonian: bool = False
     capture_overlap: bool = False
+    capture_first_order_hamiltonian: bool = False
 
     def __post_init__(self):
         self.lib_path = Path(self.lib_path)
@@ -260,6 +266,11 @@ class Calculator:
         # SimpleNamespace with fields: source, strategy, factor, custom_fn.
         # None = no modification (baseline SCF).
         self._modify: Optional[SimpleNamespace] = None
+
+        # Electric-response first-order Hamiltonian modification config
+        # (set by modify_init_first_order_ham() before do()/init()).
+        # SimpleNamespace mirroring self._modify. None = no DFPT injection.
+        self._modify_first_order: Optional[SimpleNamespace] = None
 
         self._forces: Optional[np.ndarray] = None
 
@@ -631,6 +642,19 @@ class Calculator:
             return None
         return self._runtime_aux.get("initial_hamiltonian")
 
+    @property
+    def first_order_hamiltonian(self) -> Optional[List[AimspyMatrix]]:
+        """Electric-response first-order Hamiltonian (dH/de).
+
+        Returns a list of 3 :class:`AimspyMatrix` ``[x, y, z]`` or
+        ``None`` if not captured. Requires
+        ``CalculatorConfig.capture_first_order_hamiltonian=True`` and
+        ``electric_field_response DFPT`` in control.in.
+        """
+        if self._runtime_aux is None:
+            return None
+        return self._runtime_aux.get("first_order_hamiltonian")
+
     # ==================================================================
     # H0 modification (unified API: direct + deferred)
     # ==================================================================
@@ -752,6 +776,113 @@ class Calculator:
                 strategy=strategy,
                 factor=factor,
                 custom_fn=custom_fn,
+            )
+            return fn
+
+        return decorator
+
+    # ==================================================================
+    # First-order Hamiltonian modification (DFPT electric-response warmstart)
+    # ==================================================================
+    def modify_init_first_order_ham(
+        self,
+        source: Optional[Any] = None,
+        *,
+        strategy: Union[Strategy, str] = Strategy.REPLACE,
+        factor: float = 1.0,
+        custom_fn: Optional[Callable] = None,
+        option: Optional[dict] = None,
+    ) -> Optional[Callable]:
+        """Configure dH/de (electric-response first-order Hamiltonian)
+        modification — unified API mirroring :meth:`modify_init_ham`.
+
+        Must be called before :meth:`do` / :meth:`init`.
+
+        Only ``REPLACE`` and ``ADD`` strategies are supported. The
+        *source* must implement ``to_first_order_aimspy(structure) ->
+        list[AimspyMatrix]`` (3 matrices ``[x, y, z]``, Hartree) — e.g.
+        :class:`aimspy.DeepHData`.
+
+        **Direct mode** (pre-built source)::
+
+            calc.modify_init_first_order_ham(source=data, strategy=Strategy.REPLACE)
+
+        **Deferred mode** (source generated at runtime via decorator)::
+
+            @calc.modify_init_first_order_ham(
+                strategy=Strategy.REPLACE, option={"deeph_path": "..."}
+            )
+            def gen_source(view, option):
+                # view.initial_hamiltonian / .overlap / .structure available
+                return DeepHData.from_directory(option["deeph_path"])
+
+        In deferred mode, the decorated function ``fn(view, option)``
+        is called inside the ``modify_dHde`` callback (before the
+        initial U1 computation in ``DFPT_cpscf``). *view* is a
+        lightweight namespace exposing ``initial_hamiltonian``,
+        ``overlap``, and ``structure`` if those were captured.
+
+        Parameters
+        ----------
+        source : object or None
+            External first-order matrix source with
+            ``to_first_order_aimspy(structure)`` method. Required for
+            direct REPLACE/ADD.
+        strategy : Strategy or str
+            Modification strategy — only REPLACE and ADD are supported.
+        factor : float
+            Scale factor (unused for REPLACE/ADD on first-order;
+            accepted for API symmetry).
+        custom_fn : callable or None
+            Not supported for first-order (raises if given).
+        option : dict or None
+            User data passed to the deferred source function.
+
+        Returns
+        -------
+        callable or None
+            In direct mode: ``None``. In deferred mode: a decorator.
+        """
+        if isinstance(strategy, str):
+            try:
+                strategy = Strategy(strategy.lower())
+            except ValueError:
+                raise AimspyConfigError(
+                    f"modify_init_first_order_ham: invalid strategy "
+                    f"{strategy!r}; valid: {[s.value for s in Strategy]}"
+                )
+        if strategy not in (Strategy.REPLACE, Strategy.ADD):
+            raise AimspyConfigError(
+                "modify_init_first_order_ham: only REPLACE and ADD "
+                f"strategies are supported (got {strategy.value})"
+            )
+        if custom_fn is not None:
+            raise AimspyConfigError(
+                "modify_init_first_order_ham: CUSTOM strategy is not "
+                "supported for first-order Hamiltonian"
+            )
+
+        is_direct = source is not None
+
+        if is_direct:
+            self._modify_first_order = SimpleNamespace(
+                source=source,
+                strategy=strategy,
+                factor=factor,
+                custom_fn=None,
+            )
+            return None
+
+        # Deferred mode: return a decorator (mirrors modify_init_ham).
+        def decorator(fn: Callable) -> Callable:
+            user_option = option if option is not None else {}
+            self._modify_first_order = SimpleNamespace(
+                source=None,
+                deferred_fn=fn,
+                deferred_option=user_option,
+                strategy=strategy,
+                factor=factor,
+                custom_fn=None,
             )
             return fn
 
@@ -932,6 +1063,15 @@ class Calculator:
             if hasattr(self._modify, "deferred_option"):
                 self._modify.deferred_option = None
         self._modify = None
+        # First-order modify config (mirror of self._modify for DFPT dH/de)
+        if self._modify_first_order is not None:
+            self._modify_first_order.source = None
+            self._modify_first_order.custom_fn = None
+            if hasattr(self._modify_first_order, "deferred_fn"):
+                self._modify_first_order.deferred_fn = None
+            if hasattr(self._modify_first_order, "deferred_option"):
+                self._modify_first_order.deferred_option = None
+        self._modify_first_order = None
         # Pending callback registrations
         self._pending_callbacks.clear()
 
@@ -960,15 +1100,19 @@ class Calculator:
             return
 
         mspec = self._modify
+        mspec_fo = self._modify_first_order
 
         aux = self._runtime_aux = {
             "structure": self.structure,
             "cfg": self._cfg,
             "modify": mspec,
+            "modify_first_order": mspec_fo,
             "csr_descr": None,
             "overlap": None,
             "initial_hamiltonian": None,
             "external_aimspy": None,
+            "first_order_hamiltonian": None,
+            "external_first_order_aimspy": None,
             "rank": self._rank,
         }
 
@@ -1070,6 +1214,112 @@ class Calculator:
             self._cb_mgr.register(
                 SPECS_BY_NAME["modify_h0"],
                 _on_modify_initial_hamiltonian,
+                aux,
+            )
+
+        # 6. export_dHde — only if capture_first_order_hamiltonian=True
+        if (
+            self._cfg.capture_first_order_hamiltonian
+            and not self._cb_mgr.is_registered("export_dHde")
+        ):
+
+            def _on_export_first_order_hamiltonian(
+                ax, dHde, n_ham, n_dir, n_spin, j_coord
+            ):
+                csr = ax.get("csr_descr")
+                if csr is None:
+                    return
+                # Only full-memory mode (n_dir=3, j_coord=0) is supported.
+                # Serial mode is known to misbehave (see design notes).
+                if n_dir != 3 or j_coord != 0:
+                    return
+                structure = ax["structure"]
+                mx_list = []
+                for d in range(3):  # dir 0=x, 1=y, 2=z
+                    h_slice = dHde[0, :, d]  # (n_ham,) — spin channel 0
+                    h_2d = h_slice.reshape(1, -1)  # (n_spin=1, n_ham)
+                    mx = AimspyMatrix.from_aims_csr(h_2d, csr, structure)
+                    mx_list.append(mx)
+                ax["first_order_hamiltonian"] = mx_list
+
+            self._cb_mgr.register(
+                SPECS_BY_NAME["export_dHde"],
+                _on_export_first_order_hamiltonian,
+                aux,
+            )
+
+        # 7. modify_dHde — if self._modify_first_order is set
+        if mspec_fo is not None and not self._cb_mgr.is_registered("modify_dHde"):
+
+            def _on_modify_first_order_hamiltonian(
+                ax, mx_addr, n_ham, n_dir, n_spin, j_coord
+            ):
+                md = ax.get("modify_first_order")
+                csr = ax.get("csr_descr")
+                if md is None or csr is None:
+                    return
+                if n_dir != 3 or j_coord != 0:
+                    # Only full-memory mode supported
+                    return
+                structure = ax["structure"]
+
+                # Acquire external source (list[3] AimspyMatrix)
+                ext_list = ax.get("external_first_order_aimspy")
+                if ext_list is None:
+                    if md.source is not None:
+                        ext_list = md.source.to_first_order_aimspy(structure)
+                    elif getattr(md, "deferred_fn", None) is not None:
+                        view = SimpleNamespace(
+                            initial_hamiltonian=ax.get("initial_hamiltonian"),
+                            overlap=ax.get("overlap"),
+                            structure=structure,
+                        )
+                        src = md.deferred_fn(view, md.deferred_option)
+                        if src is None:
+                            raise AimspyConfigError(
+                                "deferred modify_init_first_order_ham source "
+                                "function returned None; it must return an "
+                                "object with a to_first_order_aimspy(structure) "
+                                "method"
+                            )
+                        ext_list = src.to_first_order_aimspy(structure)
+                    else:
+                        return
+                    ax["external_first_order_aimspy"] = ext_list
+
+                if len(ext_list) != 3:
+                    raise AimspyConfigError(
+                        "first_order source returned "
+                        f"{len(ext_list)} matrices; expected 3 [x, y, z]"
+                    )
+
+                # Build Fortran flat buffer: 3 AimspyMatrix → to_aims_csr →
+                # stack as (n_spin, n_ham, n_dir) C-order then ravel.
+                csrs = [
+                    mx.to_aims_csr(csr, structure) for mx in ext_list
+                ]  # 3 × (n_spin, n_ham)
+                buffer = np.empty((int(n_spin), int(n_ham), 3), dtype=np.float64)
+                for d in range(3):
+                    buffer[:, :, d] = csrs[d]
+                flat = np.ascontiguousarray(buffer.ravel())
+
+                n_bytes = int(n_ham) * int(n_dir) * int(n_spin) * sizeof(c_double)
+                if md.strategy == Strategy.REPLACE:
+                    memmove(mx_addr, flat.ctypes.data, n_bytes)
+                elif md.strategy == Strategy.ADD:
+                    # Read current values, add, write back
+                    size = int(n_ham) * int(n_dir) * int(n_spin)
+                    current = np.ctypeslib.as_array(
+                        cast(c_void_p(mx_addr), POINTER(c_double)),
+                        shape=(size,),
+                    ).copy()
+                    current += flat
+                    memmove(mx_addr, current.ctypes.data, n_bytes)
+                # Other strategies filtered out by modify_init_first_order_ham.
+
+            self._cb_mgr.register(
+                SPECS_BY_NAME["modify_dHde"],
+                _on_modify_first_order_hamiltonian,
                 aux,
             )
 

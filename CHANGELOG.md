@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`DeepHData`: optional `electric_response.h5` (dH/de) export** —
+  electric-response first-order Hamiltonian (DFPT) support mirroring the
+  existing Hamiltonian warmstart path. New `first_order_hamiltonian_entries` /
+  `_fo_chunk_boundaries` / `_fo_chunk_shapes` dataclass fields;
+  `first_order_hamiltonian=` keyword argument on `from_aimspy` /
+  `from_memory` (accepts list of 3 `AimspyMatrix` `[x, y, z]` in Hartree);
+  `set_first_order_hamiltonian` / `save_first_order_hamiltonian` /
+  `to_first_order_aimspy` methods; auto read/write in `from_directory` /
+  `save`. The `electric_response.h5` file uses the same `atom_pairs` as
+  `hamiltonian.h5` but `chunk_shapes` rows are 3× (one block per Cartesian
+  direction `[y, z, x]` = real spherical harmonics `m = -1, 0, +1`) and
+  `entries` is 3× longer. Units are eV (converted from Hartree).
+- **`Calculator`: DFPT electric-response capture + warmstart** —
+  `CalculatorConfig.capture_first_order_hamiltonian: bool` flag;
+  `Calculator.first_order_hamiltonian` property (list of 3 `AimspyMatrix`
+  `[x, y, z]`); `Calculator.modify_init_first_order_ham(source=, strategy=)`
+  method (direct + deferred mode, REPLACE/ADD strategies) that injects
+  predicted dH/de before the initial U1 computation in `DFPT_cpscf`,
+  accelerating CPSCF convergence (tested: 11→4 iterations on MoS2).
+  Two new callbacks: `export_dHde` (post-CPSCF) and `modify_dHde`
+  (pre-CPSCF).
+- **`ExternalFirstOrderMatrixSource` Protocol** — structural typing
+  protocol for first-order Hamiltonian sources accepted by
+  `modify_init_first_order_ham`; implemented by `DeepHData`.
+- `tests/unit/test_deeph_data.py` — 21 new unit tests for first-order
+  functionality (roundtrip, direction order, shape validation, save/load,
+  error cases, protocol, calculator config).
+- `tests/unit/test_protocol_enum.py` — updated for 2 new callback names.
+
 - **`DeepHData`: optional `force.h5` MD-style export** — new `force` /
   `energy_eV` dataclass fields; `force=` / `energy=` keyword arguments on
   `from_aimspy` / `from_memory` (accepts aims-order force array + Hartree
@@ -28,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scripts (which require MPI).
 - `examples/continue_calc/run.py` — warmstart example using DeepH data
   produced by `from_scratch/run.py`.
+
+### Known Limitations
+
+- **DFPT serial mode** — `electric_field_serial .true.` (the default) is
+  not supported for dH/de warmstart; only full-memory mode
+  (`electric_field_serial .false.`) works correctly. Serial mode injects
+  correctly but CPSCF converges slower (22 vs 16 iterations on MoS2) due
+  to an unresolved interaction between the injected H1 and
+  `evaluate_U1_electric_scalapack`. The `modify_dHde` callback skips
+  injection when `n_dir != 3 or j_coord != 0` (serial mode signature).
 - Makefile targets: `test-baseline`, `test-export-deeph`, `test-warmstart`,
   `test-capture-overlap`, `test-regression`, `test-strategies`,
   `test-integration`, `test-all`, `run-from-scratch`, `run-continue-calc`,

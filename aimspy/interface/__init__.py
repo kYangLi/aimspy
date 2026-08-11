@@ -34,4 +34,23 @@ class ExternalMatrixSource(Protocol):
     def to_aimspy(self, structure: "AimspyStructure") -> "AimspyMatrix": ...
 
 
-__all__ = ["ExternalMatrixSource"]
+@runtime_checkable
+class ExternalFirstOrderMatrixSource(Protocol):
+    """Protocol for electric-response (DFPT) first-order Hamiltonian
+    sources accepted by :meth:`aimspy.Calculator.modify_init_first_order_ham`.
+
+    Any object with a ``to_first_order_aimspy(structure) -> list[AimspyMatrix]``
+    method satisfies this protocol (structural typing / duck typing). The
+    returned list must contain exactly 3 ``AimspyMatrix`` instances in
+    Cartesian order ``[x, y, z]`` (Hartree units).
+
+    Implementations:
+      - :class:`aimspy.DeepHData`
+    """
+
+    def to_first_order_aimspy(
+        self, structure: "AimspyStructure"
+    ) -> list["AimspyMatrix"]: ...
+
+
+__all__ = ["ExternalMatrixSource", "ExternalFirstOrderMatrixSource"]

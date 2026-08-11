@@ -1,6 +1,7 @@
 .PHONY: clean install test test-baseline test-warmstart test-capture-overlap \
         test-regression test-export-deeph test-strategies test-integration \
-        test-all test-memory-loop run-from-scratch run-continue-calc run-example \
+        test-all test-memory-loop test-dHde-capture test-dHde-inject-direct \
+        test-dHde-inject-defer test-dHde run-from-scratch run-continue-calc run-example \
         build lint help patch
 
 VENV := .venv
@@ -18,7 +19,11 @@ help:
 	@echo "  test-capture-overlap Run overlap capture test (no prerequisites)"
 	@echo "  test-regression      Run regression test (needs rs_hamiltonian.out + deeph_out/)"
 	@echo "  test-strategies      Run strategy test (needs rs_hamiltonian.out + deeph_out/)"
-	@echo "  test-integration     Run all 6 integration tests in dependency order"
+	@echo "  test-dHde-capture    Run DFPT dH/de capture + export (produces deeph_dHde_out/)"
+	@echo "  test-dHde-inject-direct  Run DFPT dH/de direct warmstart (needs deeph_dHde_out/)"
+	@echo "  test-dHde-inject-defer   Run DFPT dH/de deferred warmstart (needs deeph_dHde_out/)"
+	@echo "  test-dHde             Run all 3 dHde tests in order"
+	@echo "  test-integration     Run all integration tests in dependency order"
 	@echo "  test-memory-loop     Run 15-cycle memory pressure test (capture_overlap=True)"
 	@echo "  test-all             Run unit + integration tests"
 	@echo "  run-from-scratch     Run H2O baseline SCF + DeepH export example"
@@ -72,8 +77,19 @@ test-strategies:
 test-memory-loop:
 	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_memory_loop.py
 
+test-dHde-capture:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_dHde_capture.py
+
+test-dHde-inject-direct:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_dHde_inject_direct.py
+
+test-dHde-inject-defer:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_dHde_inject_defer.py
+
+test-dHde: test-dHde-capture test-dHde-inject-direct test-dHde-inject-defer
+
 test-integration: test-baseline test-export-deeph test-warmstart \
-                  test-capture-overlap test-regression test-strategies
+                  test-capture-overlap test-regression test-strategies test-dHde
 
 test-all: test test-integration
 
@@ -105,7 +121,11 @@ clean:
 	rm -rf .pytest_cache .ruff_cache .coverage dist build 2>/dev/null || true
 	rm -f aimspy/_aims*.so aimspy/_aims*.pyd 2>/dev/null || true
 	rm -rf tests/data/MoS2/deeph_out tests/data/MoS2/_regression_* 2>/dev/null || true
+	rm -rf tests/data/MoS2_DFFT/deeph_dHde_out 2>/dev/null || true
 	rm -f tests/data/MoS2/*.out 2>/dev/null || true
+	rm -f tests/data/MoS2_DFFT/*.out 2>/dev/null || true
+	rm -f tests/data/MoS2_DFFT/*.dat 2>/dev/null || true
+	rm -f tests/data/MoS2_DFFT/*.npy 2>/dev/null || true
 	rm -rf examples/*/deeph_data 2>/dev/null || true
 	rm -f examples/*/*.out 2>/dev/null || true
 	@echo "Clean complete!"
