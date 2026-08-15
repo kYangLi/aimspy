@@ -66,6 +66,9 @@ The bundled FHI-aims patch inserts trigger points inside `src/initialize_scf.f90
 | `export_h0` | Export the free-atom initial Hamiltonian (H_init) |
 | `python_func` | Generic Python hook (deferred source generation) |
 | `modify_h0` | Inject the modified H_init back into FHI-aims |
+| `export_dHde` | Export DFPT first-order Hamiltonian (post-CPSCF) |
+| `modify_dHde` | Inject modified first-order Hamiltonian (pre-CPSCF) |
+| `export_grid_data` | Export real-space grid data (post-SCF convergence) |
 
 When `modify_h0` is registered, the patch **short-circuits** the standard initial diagonalisation: it calls `advance_KS_solution` directly on the injected Hamiltonian and sets `restart_zero_iteration=.true.`, which is what enables warmstart in several iterations.
 
@@ -277,6 +280,59 @@ The bundled patch (`aimspy/_patches/aimspy-patch_v0.1.0.diff`, ~1100 lines) does
 3. **Exposes `pbc_lists.f90` arrays** — adds `target` attributes to `index_hamiltonian` / `column_index_hamiltonian` so they can be exposed via `c_loc`.
 
 The patch is **versioned** (currently `v0.1.0`) and managed by the `aimspy patch` CLI, which can apply, uninstall, dry-run, and list bundled versions. Multiple patch versions can ship side-by-side; the CLI auto-detects the currently-applied version by reading a `PATCH_VERSION` line that the patch itself writes into the source tree's `Makefile`.
+
+## Grid Data (Real-Space)
+
+`GridData` is AimsPy's in-memory representation of the FHI-aims real-space integration grid and the scalar fields living on it. It is captured after SCF convergence via the `export_grid_data` callback.
+
+### Fields
+
+| Field | Shape | Units | Description |
+|-------|-------|-------|-------------|
+| `coords` | `(3, n)` | bohr | Grid point coordinates (mapped to center cell for periodic) |
+| `partition_tab` | `(n,)` | bohr³ | Grid point integration weights |
+| `index_atom` | `(n,)` | — | 0-based atom index for each point |
+| `index_radial` | `(n,)` | — | Radial shell index |
+| `index_angular` | `(n,)` | — | Angular grid index |
+| `rho` | `(n_spin, n)` | e/bohr³ | Converged electron density |
+| `vks` | `(n_spin, n)` | Hartree | Kohn-Sham potential (includes vdW if active) |
+| `vks0` | `(n_spin, n)` | Hartree | Free-atom reference potential (no vdW) |
+| `vh` | `(n,)` | Hartree | Hartree potential (includes nuclear attraction) |
+| `vh0` | `(n,)` | Hartree | Free-atom Hartree potential |
+| `rho0` | `(n,)` | e/bohr³ | Free-atom superposition density (`rho0 == rho_free`) |
+| `atom_coords` | `(n_atoms, 3)` | Å | Atomic coordinates (from in-memory structure) |
+| `atom_symbols` | `(n_atoms,)` | — | Element symbols |
+| `lattice` | `(3, 3)` | Å | Lattice vectors |
+
+### Key semantics
+
+- **`rho0` is `rho_free`**: FHI-aims exports `free_rho_superpos` which carries a factor of `4π`; AimsPy normalises at import so `rho0` IS the free-atom density.
+- **`vks` includes vdW**: When `use_vdw_correction_hirshfeld_sc`, `use_mbd_std`, or `use_libmbd` is active, `vks = V_H + V_nuc + v_xc + v_vdw`. `vks0` does NOT include vdW (free-atom reference has no vdW correction).
+- **LDA scalar only**: The GGA non-local (vector) term `4*xc_gradient_deriv` is NOT exported. `vks` is exact for LDA, scalar part for GGA. Hybrid functionals are not supported.
+
+### Derived quantities
+
+```python
+gd.delta_rho    # rho - rho_free (density difference)
+gd.delta_vks    # vks - vks0 (potential difference)
+gd.vxc          # vks - vh (exchange-correlation potential)
+gd.vxc0         # vks0 - vh0 (free-atom XC potential)
+gd.coords_ang   # coords in Å (converted from bohr)
+gd.vks_ev       # vks in eV
+```
+
+### MPI gather
+
+`GridData.gather(local, comm)` collects per-rank subsets to root using `mpi4py.MPI.Comm.Gatherv` (zero-pickle, memory-efficient). Root peak memory is ~1x the total dataset, compared to ~3x for the default `comm.gather` on a Python dict.
+
+### npz serialization
+
+```python
+gd.save_npz("grid.npz")           # save (includes structure fields if present)
+gd2 = GridData.load_npz("grid.npz")  # load
+```
+
+The npz format is self-describing: it stores `n_full_points`, `n_spin`, `n_atoms`, all grid arrays, and optionally `atom_coords`/`atom_symbols`/`lattice`.
 
 ## Data Flow in AimsPy
 

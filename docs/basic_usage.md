@@ -159,11 +159,62 @@ with Calculator(config) as calc:
 
 Without `capture_overlap`, `calc.overlap` falls back to a rank-0 snapshot taken after `calc()`.
 
+### Real-space grid data capture
+
+Capture the converged electron density, Kohn-Sham potential, and grid geometry for post-processing:
+
+```python
+from mpi4py import MPI
+from aimspy import Calculator, CalculatorConfig
+
+comm = MPI.COMM_WORLD
+rank = comm.rank
+
+config = CalculatorConfig(
+    lib_path="/path/to/libaims.so",
+    capture_grid_data=True,  # export_grid_data callback
+)
+with Calculator(config) as calc:
+    calc.do(comm=comm, work_dir="./MoS2")
+    if rank == 0:
+        gd = calc.grid_data              # GridData object
+        gd.save_npz("grid.npz")          # save for offline analysis
+
+        # Derived quantities
+        print(f"delta_rho: {gd.delta_rho.min():.3e} .. {gd.delta_rho.max():.3e}")
+        print(f"vxc range: {gd.vxc.min():.3f} .. {gd.vxc.max():.3f} Ha")
+```
+
+`GridData` fields include `coords`, `rho`, `vks`, `vks0`, `vh`, `vh0`, `rho0`, and structure fields (`atom_coords`, `atom_symbols`, `lattice`). See [Key Concepts](./key_concepts.md#grid-data-real-space) for the full field reference and units.
+
+**MPI gather**: `GridData.gather(local, comm)` collects per-rank subsets to root using `Gatherv` (memory-efficient, zero-pickle). Root peak memory is ~1x the total dataset vs ~3x for pickle-based gather.
+
+**Visualization**: the `aimspy.viz` module provides plotting helpers:
+
+```python
+from aimspy import viz
+
+viz.scatter_slice(gd, value="delta_rho", ax=ax)  # 2-D scatter slice
+viz.radial_profile(gd, value="rho", atom_index=0)  # radial profile
+```
+
+`viz` requires `matplotlib` (imported lazily). 3-D isosurfaces require `pyvista` (optional).
+
+![MoS2 delta_rho scatter slice](_image/drho_scatter_symlog.png)
+
+*Example: `viz.scatter_slice(gd, value="delta_rho")` on MoS₂ (LDA). The
+symlog colour scale reveals weak charge-transfer features (0.001–0.01
+e/bohr³) that a linear scale would flatten.*
+
 ### Error recovery
 
 If SCF crashes, use `force_close()` (always safe) and create a fresh `Calculator`.
 
 FHI-aims is a **global singleton**: one `init`/`finalize` cycle per process, so a finalized `Calculator` cannot be reused.
+
+> **Note**: `close()` / `force_close()` now calls `aimspy_export_grid_data_finalize()`
+> to explicitly deallocate Fortran-side grid buffers (coords, potentials, vdW),
+> preventing ~500 MB memory retention after the Calculator is closed.
 
 **Context manager** (recommended: `__exit__` auto-calls `force_close()` on exception):
 

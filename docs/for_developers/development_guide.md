@@ -8,7 +8,7 @@ AimsPy is built around a layered architecture. All user-facing code lives in the
 
 | Layer | Module | Purpose |
 |-------|--------|---------|
-| Public API | `aimspy.calculator`, `aimspy.matrix`, `aimspy.structure`, `aimspy.data`, `aimspy.info`, `aimspy.exceptions` | User-facing classes and exceptions |
+| Public API | `aimspy.calculator`, `aimspy.matrix`, `aimspy.structure`, `aimspy.data`, `aimspy.info`, `aimspy.exceptions`, `aimspy.grid_data`, `aimspy.viz` | User-facing classes and exceptions |
 | Interface adapters | `aimspy.interface`, `aimspy.interface.deeph` | `ExternalMatrixSource` protocol + `DeepHData` reference adapter |
 | Callback framework | `aimspy._callbacks` | `CallbackManager`, `CallbackSpec`, `CallbackName` enum |
 | ctypes binding | `aimspy._binding` | `BindingLib`, `libloader`, Fortran struct mirrors, `CFUNCTYPE` types |
@@ -38,7 +38,7 @@ After forking the source code by following the [Fork and Pull Request Process](.
 
 Adding a new callback type requires touching the following well-defined places (documented at the top of `aimspy/_callbacks/base.py`):
 
-1. **Fortran patch** (`aimspy/_patches/aimspy-patch_vX.Y.Z.diff`) — add the abstract callback interface in `callback.f90`, the `aimspy_register_<name>_callback` subroutine in `register.f90`, and the trigger point in `initialize_scf.f90`. Bump the patch version and update the `Makefile` `PATCH_VERSION` line.
+1. **Fortran patch** (`aimspy/_patches/aimspy-patch_vX.Y.Z.diff`) — add the abstract callback interface in `callback.f90`, the `aimspy_register_<name>_callback` subroutine in `register.f90`, and the trigger point in `initialize_scf.f90` (or `scf_solver.f90` for post-SCF callbacks like `export_grid_data`). Bump the patch version and update the `Makefile` `PATCH_VERSION` line.
 
 2. **`aimspy/_binding/callback_types.py`** — add a `CFUNCTYPE` declaration matching the Fortran abstract interface:
 
@@ -64,6 +64,14 @@ Adding a new callback type requires touching the following well-defined places (
 5. **`aimspy/_callbacks/base.py`** — add a branch to `_build_ctypes_wrapper` that unpacks the `aux` and converts the C pointer arguments to numpy views before calling the user function. Follow the existing `export_ovlp` / `export_h0` branches (and mark `intent(in)` views `writeable=False`).
 
 That's it — `CallbackManager.register`, `Calculator.register_callback`, and `CallbackName` all derive from `CALLBACK_SPECS`, so the new callback is automatically wired through.
+
+#### Example: `export_grid_data` callback
+
+The `export_grid_data` callback (post-SCF trigger in `scf_solver.f90`) exports real-space grid data:
+
+- **Fortran**: `export_grid_data.f90` module with 8 module-level buffers (coords, partition_tab, indices, vks, vks0, c_vdw_potential). The vdW buffer is filled by `integrate_hamiltonian_matrix_p2` during SCF and added to `vks` at export time.
+- **Python**: `GridData._from_c` copies arrays from Fortran buffers, normalises `rho0` (removes 4π factor), and fills structure fields from `aux["structure"]`.
+- **Cleanup**: `aimspy_export_grid_data_finalize()` deallocates all buffers in `aimspy_finalize`, preventing ~500 MB retention.
 
 ### Adding a New External Matrix Source
 

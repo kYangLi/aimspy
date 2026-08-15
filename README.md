@@ -55,6 +55,9 @@ For the most comprehensive usage documentation, please visit [https://docs.deeph
 - **Pluggable Matrix Sources:** 
   Use any Hamiltonian source for warmstart. The built-in `DeepHData` adapter reads DeepH-format data directly, and adding a new format is just one subpackage under `aimspy/interface/`.
 
+- **Real-Space Grid Data Capture:**
+  Export converged density, Kohn-Sham potential, and grid geometry for post-processing and analysis. Includes vdW potential when enabled in FHI-aims.
+
 
 ## Runtime Environment
 
@@ -221,6 +224,28 @@ calc.modify_init_ham(source=data, strategy=Strategy.REPLACE)
 calc.do(comm=MPI.COMM_WORLD, work_dir="./MoS2")
 ```
 
+**Grid data capture**
+export converged density and potentials on the real-space integration grid:
+
+```python
+from mpi4py import MPI
+from aimspy import Calculator, CalculatorConfig
+
+comm = MPI.COMM_WORLD
+rank = comm.rank
+
+config = CalculatorConfig(
+    lib_path="/path/to/libaims.so",
+    capture_grid_data=True,  # capture real-space grid data
+)
+with Calculator(config) as calc:
+    calc.do(comm=comm, work_dir="./MoS2")
+    if rank == 0:
+        gd = calc.grid_data           # GridData object
+        gd.save_npz("grid.npz")       # save for offline analysis
+        print(f"delta_rho range: {gd.delta_rho.min():.3e} .. {gd.delta_rho.max():.3e}")
+```
+
 For more information on deferred source, overlap capture, error recovery, and the full API, see [Basic Usage](https://docs.deeph-pack.com/aimspy/en/latest/basic_usage.html) and [API Reference](https://docs.deeph-pack.com/aimspy/en/latest/api_reference.html).
 
 ## Citation
@@ -273,6 +298,8 @@ Since AimsPy is part of the DeepH ecosystem and drives FHI-aims calculations, we
   Inject a pre-trained DeepH Hamiltonian as the initial guess and converge SCF in several iterations, enabling rapid downstream property evaluation.
 - **FHI-aims Post-Processing:**
   Extract converged Hamiltonian, overlap, and free-atom `H_init` matrices in the standard `AimspyMatrix` format for analysis or conversion.
+- **Electronic Structure Analysis:**
+  Extract converged density and potentials on the real-space grid for bonding analysis, charge transfer visualization, and potential landscape plotting.
 - **Method Development:**
   Prototype new initial-guess strategies via the `Strategy.CUSTOM` hook, or plug in alternative DFT backends by implementing the `ExternalMatrixSource` protocol.
 

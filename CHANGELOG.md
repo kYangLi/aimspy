@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Real-space grid data capture (`export_grid_data`)** — new callback
+  (8th) exporting converged density, Kohn-Sham potential, Hartree
+  potential, and grid geometry (coords/weights/indices) after SCF.
+  Includes vdW potential in `vks` when enabled in FHI-aims
+  (`use_vdw_correction_hirshfeld_sc` / `use_mbd_std` / `use_libmbd`).
+  `GridData` dataclass with derived quantities (`delta_rho`, `delta_vks`,
+  `vxc`, `rho_free`), npz I/O, and Gatherv-based MPI gather (root peak
+  memory ~1x vs ~3x for pickle-based gather).
+- **Visualization helpers (`aimspy.viz`)** — `scatter_slice`,
+  `slice_contour`, `radial_profile`, `isosurface` for grid data analysis.
+  `radial_profile` uses exact nuclear positions from `atom_coords` when
+  available (fallback: grid-point centroid).
+- `tests/unit/test_grid_data.py` (19 tests), `tests/unit/test_viz.py`
+  (20 tests), `tests/test_grid_data_capture.py` (integration test).
+- `tests/data/MoS2_LDA/` — LDA test fixture for grid data capture.
+
+### Changed
+
+- **Fortran buffer lifecycle** — `aimspy_export_grid_data_finalize()`
+  explicitly deallocates all 8 module-level buffers (coords, partition_tab,
+  indices, vks, vks0, c_vdw_potential) in `aimspy_finalize`, preventing
+  ~500 MB retention after Calculator close.
+
+### Fixed
+
+- **vdW potential omission** — `vks` now includes vdW correction when
+  vdW is active. Previously `vks = V_H + v_xc` only, missing the vdW
+  contribution that `integrate_hamiltonian_matrix_p2` adds to the
+  Hamiltonian.
+
 - **Fortran callback deregistration + `aimspy_reset_callbacks`** — new
   `TAimspyCallback.reset_all` clears all registered funptrs / aux pointers /
   input pointers / registered-flags; called inside `aimspy_finalize` and
