@@ -1264,7 +1264,7 @@ index 00000000..626ac0d6
 +
 +end module aimspy_callback_register
 diff --git a/src/electric_response/electric_response.f90 b/src/electric_response/electric_response.f90
-index 40dc3eb6..476dcea8 100644
+index 40dc3eb6..292b9fd0 100644
 --- a/src/electric_response/electric_response.f90
 +++ b/src/electric_response/electric_response.f90
 @@ -151,6 +151,7 @@ subroutine elecres_calculation()
@@ -1283,6 +1283,15 @@ index 40dc3eb6..476dcea8 100644
          perturbation_list = 1 !Set whole list to 1, but only row 1 is needed for x,y,z
          call DFPT_initialization(.false., perturbation_list)
          if (n_periodic==0) then
+@@ -277,7 +279,7 @@ subroutine elecres_calculation()
+                 Omega_MO_complex_scalapack=Omega_MO_complex_scalapack)
+         endif !n_periodic
+ 
+-        if (.not.converged_cpscf) then
++        if (.not.converged_cpscf.and..not.(postprocess_anyway==PP_ANYWAY_EVERYTHING)) then
+             call aims_stop('CPSCF not converged')
+         endif
+ 
 diff --git a/src/initialize_scf.f90 b/src/initialize_scf.f90
 index 7a51c788..18637a26 100644
 --- a/src/initialize_scf.f90
