@@ -154,6 +154,51 @@ _ATOMIC_NUMBERS: dict[str, int] = {
 # -------------------------------------------------------------------
 # Conversion helpers
 # -------------------------------------------------------------------
+def _reorder_flat_entries(
+    entries: np.ndarray,
+    src_atom_pairs: np.ndarray,
+    src_cb: np.ndarray,
+    dst_atom_pairs: np.ndarray,
+    dst_cb: np.ndarray,
+) -> np.ndarray:
+    """Reorder a flat entries array from *src* pair order to *dst* pair order.
+
+    Both orderings must describe the same set of atom-pair keys (a
+    permutation); otherwise ``AimspyConfigError`` is raised.  Blocks are
+    copied per atom pair according to the source chunk layout and placed
+    at the destination offsets.  Per-pair block sizes are derived from the
+    chunk boundaries (``src_cb``/``dst_cb``) and validated for equality.
+
+    Works for both standard matrices (block = ``(nr, nc)``) and the
+    3×-expanded ``electric_response.h5`` (block = ``(3*nr, nc)``) — the
+    block sizes are implicit in each file's chunk boundaries.
+    """
+    src_index = {tuple(int(v) for v in row): i for i, row in enumerate(src_atom_pairs)}
+    n_dst = dst_atom_pairs.shape[0]
+    if len(src_index) != n_dst:
+        raise AimspyConfigError(
+            f"atom_pairs count mismatch: {len(src_index)} vs {n_dst}"
+        )
+    out = np.empty(int(dst_cb[-1]), dtype=entries.dtype)
+    for k_dst in range(n_dst):
+        key = tuple(int(v) for v in dst_atom_pairs[k_dst])
+        k_src = src_index.get(key)
+        if k_src is None:
+            raise AimspyConfigError(
+                f"atom_pairs are not a permutation: key {key} missing "
+                f"in source file"
+            )
+        s0, s1 = int(src_cb[k_src]), int(src_cb[k_src + 1])
+        d0, d1 = int(dst_cb[k_dst]), int(dst_cb[k_dst + 1])
+        if (s1 - s0) != (d1 - d0):
+            raise AimspyConfigError(
+                f"chunk size mismatch for pair {key}: "
+                f"src {s1 - s0} vs dst {d1 - d0}"
+            )
+        out[d0:d1] = entries[s0:s1]
+    return out
+
+
 def _aimspy_blocks_to_poscar(matrix, structure) -> dict[tuple, np.ndarray]:
     """Reorder aimspy blocks (aims atom order) to POSCAR atom order.
 
@@ -181,7 +226,6 @@ def _aimspy_blocks_to_poscar(matrix, structure) -> dict[tuple, np.ndarray]:
 def _blocks_to_flat_entries(
     blocks: dict[tuple[int, ...], np.ndarray],
     atom_pairs: np.ndarray,
-    chunk_boundaries: np.ndarray,
     chunk_shapes: np.ndarray,
     factor: float = 1.0,
 ) -> np.ndarray:
@@ -189,6 +233,7 @@ def _blocks_to_flat_entries(
 
     Iterates over ``atom_pairs`` order, looks up each block by its key,
     flattens to 1D and concatenates. Missing blocks are zero-filled.
+    Block shapes are validated against ``chunk_shapes``.
     """
     n_pairs = atom_pairs.shape[0]
     lst: list[np.ndarray] = []
@@ -198,6 +243,11 @@ def _blocks_to_flat_entries(
         nc = int(chunk_shapes[ip, 1])
         blk = blocks.get(key)
         if blk is not None:
+            if blk.shape != (nr, nc):
+                raise AimspyConfigError(
+                    f"Block {key}: shape {tuple(blk.shape)} != expected "
+                    f"({nr}, {nc}) from chunk_shapes"
+                )
             lst.append(np.ascontiguousarray(blk, dtype=np.float64).ravel())
         else:
             lst.append(np.zeros(nr * nc, dtype=np.float64))
@@ -254,8 +304,18 @@ def _compute_n_basis(
 
 
 def _compute_occupation(atom_symbols: list[str]) -> int:
-    """Total number of electrons = Σ(Z)."""
-    return sum(_ATOMIC_NUMBERS.get(s, 0) for s in atom_symbols)
+    """Total number of electrons = Σ(Z).
+
+    Raises ``AimspyConfigError`` for an unknown element symbol (a typo
+    would otherwise silently contribute 0 electrons).
+    """
+    total = 0
+    for s in atom_symbols:
+        z = _ATOMIC_NUMBERS.get(s)
+        if z is None:
+            raise AimspyConfigError(f"Unknown element symbol: {s!r}")
+        total += z
+    return total
 
 
 # DeepH direction order: [y, z, x] = indices [1, 2, 0] into Cartesian [x, y, z]
@@ -404,26 +464,44 @@ class DeepHData:
         lattice, atom_symbols, atom_coords = _read_poscar(poscar_path)
         with open(info_path, "r") as f:
             info = json.load(f)
+        if info.get("spinful", False):
+            raise AimspyConfigError(
+                "spin-polarized (spinful) DeepH data is not yet supported "
+                "by the aimspy adapter (n_spin=1 only)"
+            )
         eom = info.get("elements_orbital_map", {})
         n_basis = info.get("orbits_quantity", 0)
         if n_basis == 0:
             n_basis = _compute_n_basis(atom_symbols, eom)
         fermi_eV = info.get("fermi_energy_eV", 0.0)
 
-        # Read CSR layout from the first found file
+        # Read CSR layout from the first found file (canonical layout)
         first_name, first_path = found[0]
         with h5py.File(first_path, "r") as f:
             atom_pairs = f["atom_pairs"][:].astype(np.int32)
             cb = f["chunk_boundaries"][:].astype(np.int32)
             cs = f["chunk_shapes"][:].astype(np.int32)
 
-        # Read each matrix
+        # Read each matrix; validate / reorder atom_pairs against the
+        # canonical layout (entries are reordered per-pair if the file
+        # uses a different but equivalent pair ordering).
         entries = None
         overlap_entries = None
         init_entries = None
         for name, p in found:
             with h5py.File(p, "r") as f:
                 data = f["entries"][:].astype(np.float64)
+                if p != first_path:
+                    ap_check = f["atom_pairs"][:].astype(np.int32)
+                    if not np.array_equal(ap_check, atom_pairs):
+                        cb_check = f["chunk_boundaries"][:].astype(np.int32)
+                        data = _reorder_flat_entries(
+                            data,
+                            ap_check,
+                            cb_check,
+                            atom_pairs,
+                            cb,
+                        )
             if name == "hamiltonian":
                 entries = data
             elif name == "overlap":
@@ -458,6 +536,41 @@ class DeepHData:
                 fo_entries = f["entries"][:].astype(np.float64)
                 fo_cb = f["chunk_boundaries"][:].astype(np.int32)
                 fo_cs = f["chunk_shapes"][:].astype(np.int32)
+                fo_ap = f["atom_pairs"][:].astype(np.int32)
+            # Internal consistency + cross-file atom_pairs validation
+            if np.any(fo_cs[:, 0] % 3 != 0):
+                raise AimspyConfigError(
+                    "electric_response.h5: chunk_shapes[:, 0] not all "
+                    "divisible by 3 (corrupted file?)"
+                )
+            if int(fo_cb[-1]) != int(fo_entries.shape[0]):
+                raise AimspyConfigError(
+                    f"electric_response.h5: chunk_boundaries[-1]={int(fo_cb[-1])} "
+                    f"!= len(entries)={int(fo_entries.shape[0])}"
+                )
+            if not np.array_equal(fo_ap, atom_pairs):
+                # Reorder entries into the canonical atom_pairs order.  The
+                # destination chunk layout must be the 3×-expanded one (each
+                # first-order block is (3*nr, nc)), so rebuild it from the
+                # canonical standard chunk_shapes first, then use it as dst.
+                n_pairs = atom_pairs.shape[0]
+                fo_cs_new = np.zeros((n_pairs, 2), dtype=np.int32)
+                fo_cb_new = np.zeros((n_pairs + 1,), dtype=np.int32)
+                for ip in range(n_pairs):
+                    nr = int(cs[ip, 0])
+                    nc = int(cs[ip, 1])
+                    fo_cs_new[ip, 0] = 3 * nr
+                    fo_cs_new[ip, 1] = nc
+                    fo_cb_new[ip + 1] = fo_cb_new[ip] + 3 * nr * nc
+                fo_entries = _reorder_flat_entries(
+                    fo_entries,
+                    fo_ap,
+                    fo_cb,
+                    atom_pairs,
+                    fo_cb_new,
+                )
+                fo_cs = fo_cs_new
+                fo_cb = fo_cb_new
 
         return cls(
             lattice=lattice,
@@ -519,6 +632,26 @@ class DeepHData:
         """
         if n_basis == 0:
             n_basis = _compute_n_basis(atom_symbols, elements_orbital_map)
+
+        # The first-order Hamiltonian (dH/de) is only physically meaningful
+        # when all three Cartesian directions are present; require all three
+        # block dicts to be non-empty if provided at all.
+        if first_order_hamiltonian_blocks is not None:
+            if (
+                not isinstance(first_order_hamiltonian_blocks, (list, tuple))
+                or len(first_order_hamiltonian_blocks) != 3
+            ):
+                raise AimspyConfigError(
+                    "first_order_hamiltonian_blocks must be a list of 3 dicts "
+                    "[x, y, z]"
+                )
+            if not all(first_order_hamiltonian_blocks[d] for d in range(3)):
+                raise AimspyConfigError(
+                    "first_order_hamiltonian_blocks: all three directions "
+                    "[x, y, z] must be non-empty; dH/de data is only "
+                    "meaningful when all three directions are present"
+                )
+
         layout_blocks = (
             hamiltonian_blocks
             or overlap_blocks
@@ -598,14 +731,7 @@ class DeepHData:
         fo_cb = None
         fo_cs = None
         if first_order_hamiltonian_blocks is not None:
-            if (
-                not isinstance(first_order_hamiltonian_blocks, (list, tuple))
-                or len(first_order_hamiltonian_blocks) != 3
-            ):
-                raise AimspyConfigError(
-                    "first_order_hamiltonian_blocks must be a list of 3 dicts "
-                    "[x, y, z]"
-                )
+            # (list-of-3 + all-non-empty validation done above)
             fo_entries, fo_cb, fo_cs = _build_first_order_entries(
                 first_order_hamiltonian_blocks,
                 atom_pairs,
@@ -784,7 +910,6 @@ class DeepHData:
         self.entries = _blocks_to_flat_entries(
             blocks,
             self.atom_pairs,
-            self.chunk_boundaries,
             self.chunk_shapes,
             factor=HARTREE_TO_EV,
         )
@@ -795,7 +920,6 @@ class DeepHData:
         self.overlap_entries = _blocks_to_flat_entries(
             blocks,
             self.atom_pairs,
-            self.chunk_boundaries,
             self.chunk_shapes,
         )
 
@@ -807,7 +931,6 @@ class DeepHData:
         self.initial_hamiltonian_entries = _blocks_to_flat_entries(
             blocks,
             self.atom_pairs,
-            self.chunk_boundaries,
             self.chunk_shapes,
             factor=HARTREE_TO_EV,
         )
@@ -866,6 +989,12 @@ class DeepHData:
                 "matrix_list must contain exactly 3 AimspyMatrix [x, y, z]"
             )
         blocks_list = [_aimspy_blocks_to_poscar(mx, structure) for mx in matrix_list]
+        if not all(blocks_list[d] for d in range(3)):
+            raise AimspyConfigError(
+                "first_order_hamiltonian: all three directions [x, y, z] must "
+                "produce non-empty blocks; dH/de data is only meaningful when "
+                "all three directions are present"
+            )
         entries, fo_cb, fo_cs = _build_first_order_entries(
             blocks_list,
             self.atom_pairs,
@@ -967,6 +1096,12 @@ class DeepHData:
         """
         if self.first_order_hamiltonian_entries is None:
             raise AimspyConfigError("No first_order_hamiltonian entries to save")
+        if self._fo_chunk_boundaries is None or self._fo_chunk_shapes is None:
+            raise AimspyConfigError(
+                "first_order chunk layout (_fo_chunk_boundaries/_fo_chunk_shapes) "
+                "is not set; use set_first_order_hamiltonian, from_memory, or "
+                "from_directory to establish it before save_first_order_hamiltonian"
+            )
         p = Path(path) if path is not None else self._require_path()
         p.mkdir(parents=True, exist_ok=True)
         with h5py.File(p / "electric_response.h5", "w") as f:
@@ -1016,10 +1151,13 @@ class DeepHData:
         if self.force is not None:
             extra.append("+F")
         tag = " ".join(extra)
+        # Summarize species as element -> count (a full per-atom list is
+        # unreadable for large supercells).
+        species_summary = dict(Counter(self.atom_symbols))
         return (
             f"DeepHData(n_atoms={self.n_atoms}, n_pairs={self.n_pairs}"
             + (f", {tag}" if tag else "")
-            + f", species={list(self.atom_symbols)})"
+            + f", species={species_summary})"
         )
 
     # ----------------------------------------------------------------

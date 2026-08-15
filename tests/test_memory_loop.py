@@ -60,6 +60,10 @@ N_ITER = int(os.environ.get("AIMSPY_MEM_LOOP_N", "15"))
 DRIFT_THRESHOLD_KB = int(
     os.environ.get("AIMSPY_MEM_LOOP_THRESHOLD_KB", str(100 * 1024))
 )
+# Inject one failing calc() at this iteration number (1-based, so the
+# default 5 means the 5th iteration, i=4) to verify the failure path
+# releases large runtime arrays (overlap / H_init / ...).  0 disables.
+FAIL_AT = int(os.environ.get("AIMSPY_MEM_LOOP_FAIL_AT", "5"))
 
 
 def _rss_kb() -> int:
@@ -107,11 +111,28 @@ for i in range(N_ITER):
     calc = Calculator(config)
 
     try:
-        calc.do(comm=comm, work_dir=DATA_DIR)
-        # Access overlap to ensure it's materialized (not lazily deferred)
-        _ = calc.overlap
+        if FAIL_AT > 0 and i + 1 == FAIL_AT:
+            # Force a failure *inside* calc() by registering a callback that
+            # raises, so the failure path (release of large runtime arrays)
+            # is exercised.  The callback fires during SCF; the exception is
+            # captured and re-raised as AimspyCallbackError by calc().
+            def _boom(aux):
+                raise RuntimeError("injected failure for memory test")
+
+            calc.init(comm=comm, work_dir=DATA_DIR)
+            calc.register_callback("python_func", _boom, aux={})
+            try:
+                calc.calc()
+            except Exception as e:
+                if rank == 0:
+                    print(f"  [iter {i}] injected failure caught: {type(e).__name__}")
+            # Even after failure, force_close must free everything.
+        else:
+            calc.do(comm=comm, work_dir=DATA_DIR)
+            # Access overlap to ensure it's materialized (not lazily deferred)
+            _ = calc.overlap
     finally:
-        calc.close()
+        calc.force_close()
         comm.Barrier()
 
     rss = _rss_snapshot(f"iter {i} (close'd)")

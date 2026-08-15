@@ -386,6 +386,7 @@ class Calculator:
         except Exception:
             self._state = CalcState.FAILED
             self._log_error("init() failed; attempting cleanup")
+            self._release_large_runtime_arrays()
             self._defensive_finalize()
             self._clear_all_state()
             raise
@@ -407,6 +408,9 @@ class Calculator:
         except Exception:
             self._state = CalcState.FAILED
             self._log_error("aimspy_run() failed")
+            # Release large matrices held in _runtime_aux so a failed calc
+            # does not retain them (the user may not call force_close()).
+            self._release_large_runtime_arrays()
             raise
         self._state = CalcState.DONE
         self._log_info("calc done")
@@ -417,7 +421,15 @@ class Calculator:
             self._forces = get_forces(self._binding, self.info.n_atoms)
         except Exception as e:
             self._log_warning("forces capture failed: %r", e)
-        self._check_callback_errors()
+        try:
+            self._check_callback_errors()
+        except AimspyCallbackError:
+            # A callback raised during SCF — results are untrustworthy.
+            # Mark FAILED so that DONE-only properties (hamiltonian,
+            # energy, ...) are not accessible.
+            self._state = CalcState.FAILED
+            self._release_large_runtime_arrays()
+            raise
         return self
 
     def do(
@@ -593,14 +605,26 @@ class Calculator:
 
     @property
     def hamiltonian(self) -> AimspyMatrix:
-        """Converged Hamiltonian as :class:`AimspyMatrix` (rank 0, ``DONE`` only)."""
+        """Converged Hamiltonian as :class:`AimspyMatrix` (rank 0, ``DONE`` only).
+
+        The result is cached after the first access (the CSR walk +
+        block-dict construction is expensive for large systems); repeated
+        accesses return the cached :class:`AimspyMatrix`.
+        """
         self._state_guard(CalcState.DONE, "read hamiltonian")
+        if self._runtime_aux is not None:
+            cached = self._runtime_aux.get("hamiltonian")
+            if cached is not None:
+                return cached
         csr = self.csr_descr
         if csr is None:
             raise AimspyStateError(
                 "csr_descr not available; calc() must complete first."
             )
-        return AimspyMatrix.from_aims_csr(self.rs_hamiltonian, csr, self.structure)
+        mx = AimspyMatrix.from_aims_csr(self.rs_hamiltonian, csr, self.structure)
+        if self._runtime_aux is not None:
+            self._runtime_aux["hamiltonian"] = mx
+        return mx
 
     @property
     def overlap(self) -> AimspyMatrix:
@@ -650,10 +674,23 @@ class Calculator:
         ``None`` if not captured. Requires
         ``CalculatorConfig.capture_first_order_hamiltonian=True`` and
         ``electric_field_response DFPT`` in control.in.
+
+        In serial mode (``electric_field_serial .true.``) the three
+        directions are captured by three separate CPSCF calls; this
+        property returns the complete ``[x, y, z]`` list only after all
+        three directions have been captured (``calc()`` done). If any
+        direction is still missing it returns ``None``.
         """
         if self._runtime_aux is None:
             return None
-        return self._runtime_aux.get("first_order_hamiltonian")
+        fo = self._runtime_aux.get("first_order_hamiltonian")
+        if fo is None:
+            return None
+        # Serial mode may leave a partially-filled list containing None
+        # entries if not all three directions have fired yet.
+        if isinstance(fo, list) and any(x is None for x in fo):
+            return None
+        return fo
 
     # ==================================================================
     # H0 modification (unified API: direct + deferred)
@@ -670,15 +707,8 @@ class Calculator:
         """Configure H0 modification — unified API for both direct and
         deferred source.
 
-        Must be called before :meth:`do` / :meth:`init`.
-
-        .. warning::
-
-            This method has no state guard. Calling it after
-            :meth:`init` or :meth:`do` sets ``self._modify`` but the
-            callback wiring (``_wire_callbacks``) has already run, so
-            the modification will **silently have no effect**. Always
-            call before ``init()`` / ``do()``.
+        Must be called before :meth:`do` / :meth:`init` (state UNINIT);
+        calling after init raises :class:`AimspyStateError`.
 
         **Direct mode** (pre-built source or source-less strategy)::
 
@@ -731,6 +761,13 @@ class Calculator:
             If CUSTOM strategy is used without ``custom_fn``, or if
             *strategy* is not a valid :class:`Strategy` value.
         """
+        if self._state != CalcState.UNINIT:
+            raise AimspyStateError(
+                f"modify_init_ham must be called before init()/do() "
+                f"(current state: {self._state.value}); the callback wiring "
+                f"has already run, so calling it now would silently have "
+                f"no effect"
+            )
         if isinstance(strategy, str):
             try:
                 strategy = Strategy(strategy.lower())
@@ -796,7 +833,8 @@ class Calculator:
         """Configure dH/de (electric-response first-order Hamiltonian)
         modification — unified API mirroring :meth:`modify_init_ham`.
 
-        Must be called before :meth:`do` / :meth:`init`.
+        Must be called before :meth:`do` / :meth:`init` (state UNINIT);
+        calling after init raises :class:`AimspyStateError`.
 
         Only ``REPLACE`` and ``ADD`` strategies are supported. The
         *source* must implement ``to_first_order_aimspy(structure) ->
@@ -820,7 +858,11 @@ class Calculator:
         is called inside the ``modify_dHde`` callback (before the
         initial U1 computation in ``DFPT_cpscf``). *view* is a
         lightweight namespace exposing ``initial_hamiltonian``,
-        ``overlap``, and ``structure`` if those were captured.
+        ``overlap``, and ``structure`` if those were captured. If the
+        deferred function uses ``view.initial_hamiltonian`` or
+        ``view.overlap``, enable the corresponding
+        ``CalculatorConfig.capture_initial_hamiltonian`` /
+        ``capture_overlap`` — at least one of them must be available.
 
         Parameters
         ----------
@@ -843,6 +885,13 @@ class Calculator:
         callable or None
             In direct mode: ``None``. In deferred mode: a decorator.
         """
+        if self._state != CalcState.UNINIT:
+            raise AimspyStateError(
+                f"modify_init_first_order_ham must be called before "
+                f"init()/do() (current state: {self._state.value}); the "
+                f"callback wiring has already run, so calling it now "
+                f"would silently have no effect"
+            )
         if isinstance(strategy, str):
             try:
                 strategy = Strategy(strategy.lower())
@@ -1012,6 +1061,26 @@ class Calculator:
         exc.callback_errors = captured
         raise exc from captured[0][1]
 
+    def _release_large_runtime_arrays(self) -> None:
+        """Drop large matrix references held in ``_runtime_aux``.
+
+        Called on the failure paths of :meth:`init` / :meth:`calc` so that
+        a failed calculation does not retain large numpy arrays (overlap,
+        initial / converged Hamiltonian, first-order Hamiltonian, external
+        sources) if the user does not call :meth:`force_close`.
+        """
+        if self._runtime_aux is None:
+            return
+        for key in (
+            "overlap",
+            "initial_hamiltonian",
+            "hamiltonian",
+            "first_order_hamiltonian",
+            "external_aimspy",
+            "external_first_order_aimspy",
+        ):
+            self._runtime_aux[key] = None
+
     def _defensive_finalize(self) -> None:
         """Attempt aimspy_finalize(), swallowing all errors.
 
@@ -1035,9 +1104,27 @@ class Calculator:
         across calculation cycles.
         """
         self._state = CalcState.FINALIZED
-        # CallbackManager: release all wrappers, aux objects, py_object
-        # anchors, and error records. This breaks any user-side reference
-        # cycles (e.g. if a user callback fn captured `calc`).
+        # Belt-and-suspenders: explicitly reset Fortran-side callback
+        # funptrs / flags (in addition to the reset inside aimspy_finalize)
+        # so a second Calculator in the same process never calls a dangling
+        # Python function pointer left over from this Calculator.
+        #
+        # ORDERING CONSTRAINT: this reset MUST run before
+        # ``self._cb_mgr.clear()``.  ``clear()`` drops the only strong
+        # references to the per-callback ``aux`` objects (passed to Fortran
+        # as raw ``id(aux)`` pointers).  If any Fortran callback were to
+        # fire after ``clear()`` — e.g. during a later finalization path —
+        # dereferencing such a pointer would be a use-after-free.  Resetting
+        # the Fortran funptrs first guarantees no callback can fire once
+        # the Python-side aux references are released.  Do not reorder.
+        if self._binding is not None and self._binding.has("aimspy_reset_callbacks"):
+            try:
+                self._binding.aimspy_reset_callbacks()
+            except Exception as e:
+                self._log_warning("aimspy_reset_callbacks raised: %r", e)
+        # CallbackManager: release all wrappers, aux objects, and error
+        # records. This breaks any user-side reference cycles (e.g. if a
+        # user callback fn captured `calc`).  Must run AFTER the reset above.
         if self._cb_mgr is not None:
             self._cb_mgr.clear()
         # BindingLib: release CDLL references
@@ -1110,6 +1197,7 @@ class Calculator:
             "csr_descr": None,
             "overlap": None,
             "initial_hamiltonian": None,
+            "hamiltonian": None,  # cache for the converged Hamiltonian (rank 0)
             "external_aimspy": None,
             "first_order_hamiltonian": None,
             "external_first_order_aimspy": None,
@@ -1229,18 +1317,35 @@ class Calculator:
                 csr = ax.get("csr_descr")
                 if csr is None:
                     return
-                # Only full-memory mode (n_dir=3, j_coord=0) is supported.
-                # Serial mode is known to misbehave (see design notes).
-                if n_dir != 3 or j_coord != 0:
-                    return
                 structure = ax["structure"]
-                mx_list = []
-                for d in range(3):  # dir 0=x, 1=y, 2=z
-                    h_slice = dHde[0, :, d]  # (n_ham,) — spin channel 0
-                    h_2d = h_slice.reshape(1, -1)  # (n_spin=1, n_ham)
-                    mx = AimspyMatrix.from_aims_csr(h_2d, csr, structure)
-                    mx_list.append(mx)
-                ax["first_order_hamiltonian"] = mx_list
+                if n_dir == 3 and j_coord == 0:
+                    # Full-memory mode: all 3 directions in one buffer.
+                    mx_list = []
+                    for d in range(3):  # dir 0=x, 1=y, 2=z
+                        h_slice = dHde[0, :, d]  # (n_ham,) — spin channel 0
+                        h_2d = h_slice.reshape(1, -1)  # (n_spin=1, n_ham)
+                        mx = AimspyMatrix.from_aims_csr(h_2d, csr, structure)
+                        mx_list.append(mx)
+                    ax["first_order_hamiltonian"] = mx_list
+                elif n_dir == 1 and j_coord in (1, 2, 3):
+                    # Serial mode: one direction per CPSCF call; accumulate
+                    # into ax["first_order_hamiltonian"][d] (d = 0/1/2 = x/y/z).
+                    fo = ax.get("first_order_hamiltonian")
+                    if fo is None or not isinstance(fo, list) or len(fo) != 3:
+                        fo = [None, None, None]
+                        ax["first_order_hamiltonian"] = fo
+                    d = int(j_coord) - 1  # 1=x→0, 2=y→1, 3=z→2
+                    h_slice = dHde[0, :, 0]  # serial buffer has n_dir=1
+                    h_2d = h_slice.reshape(1, -1)
+                    fo[d] = AimspyMatrix.from_aims_csr(h_2d, csr, structure)
+                else:
+                    self._log_warning(
+                        "export_dHde: unexpected n_dir=%d j_coord=%d; "
+                        "ignoring (expected n_dir=3/j_coord=0 full-memory or "
+                        "n_dir=1/j_coord∈{1,2,3} serial)",
+                        int(n_dir),
+                        int(j_coord),
+                    )
 
             self._cb_mgr.register(
                 SPECS_BY_NAME["export_dHde"],
@@ -1258,8 +1363,16 @@ class Calculator:
                 csr = ax.get("csr_descr")
                 if md is None or csr is None:
                     return
-                if n_dir != 3 or j_coord != 0:
-                    # Only full-memory mode supported
+                is_full = n_dir == 3 and j_coord == 0
+                is_serial = n_dir == 1 and j_coord in (1, 2, 3)
+                if not (is_full or is_serial):
+                    self._log_warning(
+                        "modify_dHde: unexpected n_dir=%d j_coord=%d; "
+                        "ignoring (expected n_dir=3/j_coord=0 full-memory or "
+                        "n_dir=1/j_coord∈{1,2,3} serial)",
+                        int(n_dir),
+                        int(j_coord),
+                    )
                     return
                 structure = ax["structure"]
 
@@ -1274,7 +1387,23 @@ class Calculator:
                             overlap=ax.get("overlap"),
                             structure=structure,
                         )
-                        src = md.deferred_fn(view, md.deferred_option)
+                        # If the deferred source accesses view.initial_hamiltonian
+                        # / view.overlap but the corresponding capture_* flag was
+                        # not enabled, it will hit an AttributeError on None —
+                        # wrap it in a clear message. (A deferred source that
+                        # does not use the view is unaffected.)
+                        try:
+                            src = md.deferred_fn(view, md.deferred_option)
+                        except AttributeError as e:
+                            raise AimspyConfigError(
+                                "deferred modify_init_first_order_ham source "
+                                "failed (did it access view.initial_hamiltonian "
+                                "or view.overlap while the corresponding capture "
+                                "flag was off? enable "
+                                "CalculatorConfig(capture_initial_hamiltonian=True) "
+                                "and/or capture_overlap=True). "
+                                f"Original error: {e}"
+                            ) from e
                         if src is None:
                             raise AimspyConfigError(
                                 "deferred modify_init_first_order_ham source "
@@ -1295,20 +1424,39 @@ class Calculator:
 
                 # Build Fortran flat buffer: 3 AimspyMatrix → to_aims_csr →
                 # stack as (n_spin, n_ham, n_dir) C-order then ravel.
+                # For serial mode (n_dir=1) only the current direction
+                # (j_coord) is written; the buffer is (n_spin, n_ham, 1).
+                n_dir_eff = 3 if is_full else 1
+                dir_indices = range(3) if is_full else (int(j_coord) - 1,)
+
                 csrs = [
                     mx.to_aims_csr(csr, structure) for mx in ext_list
                 ]  # 3 × (n_spin, n_ham)
-                buffer = np.empty((int(n_spin), int(n_ham), 3), dtype=np.float64)
-                for d in range(3):
-                    buffer[:, :, d] = csrs[d]
+
+                # Validate shapes before memmove (avoid silent corruption).
+                expected = (int(n_spin), int(n_ham))
+                for d, arr in enumerate(csrs):
+                    if arr.shape != expected:
+                        raise AimspyConfigError(
+                            f"first_order matrix [{d}] to_aims_csr shape "
+                            f"{arr.shape} != expected {expected} "
+                            f"(n_spin, n_ham); structure/CSR mismatch"
+                        )
+
+                buffer = np.empty(
+                    (int(n_spin), int(n_ham), n_dir_eff), dtype=np.float64
+                )
+                for d in dir_indices:
+                    out_d = d if is_full else 0
+                    buffer[:, :, out_d] = csrs[d]
                 flat = np.ascontiguousarray(buffer.ravel())
 
-                n_bytes = int(n_ham) * int(n_dir) * int(n_spin) * sizeof(c_double)
+                n_bytes = int(n_ham) * n_dir_eff * int(n_spin) * sizeof(c_double)
                 if md.strategy == Strategy.REPLACE:
                     memmove(mx_addr, flat.ctypes.data, n_bytes)
                 elif md.strategy == Strategy.ADD:
                     # Read current values, add, write back
-                    size = int(n_ham) * int(n_dir) * int(n_spin)
+                    size = int(n_ham) * n_dir_eff * int(n_spin)
                     current = np.ctypeslib.as_array(
                         cast(c_void_p(mx_addr), POINTER(c_double)),
                         shape=(size,),

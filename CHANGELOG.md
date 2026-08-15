@@ -8,6 +8,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Fortran callback deregistration + `aimspy_reset_callbacks`** — new
+  `TAimspyCallback.reset_all` clears all registered funptrs / aux pointers /
+  input pointers / registered-flags; called inside `aimspy_finalize` and
+  exposed via the new `aimspy_reset_callbacks` bind(c) entry point, which
+  `Calculator.close()` / `force_close()` invoke (when the symbol exists).
+  Prevents a second `Calculator` in the same process from calling a
+  dangling Python function pointer left over from a previous `Calculator`.
+- **Serial DFPT dH/de support** — `export_dHde` now accumulates the three
+  Cartesian directions across the three serial CPSCF calls
+  (`n_dir=1, j_coord∈{1,2,3}`); `modify_dHde` injects only the current
+  direction in serial mode. Previously serial mode was silently ignored.
+- `tests/test_dHde_serial_capture.py` — self-contained serial capture test:
+  runs full-memory (reference) + serial capture and cross-validates the
+  dH/de tensors to within the CPSCF convergence noise (global relative
+  difference < 1e-4; the two modes run independent CPSCF cycles converging
+  to `dfpt_sc_accuracy_dm` ~1e-3, so they do not agree to machine precision).
+- `tests/test_dHde_serial_inject.py` — serial warmstart test: injects the
+  serial capture product and verifies per-direction CPSCF iteration counts
+  are reduced (MoS2: [11,12,12] → [2,2,4]).
+- `tests/data/MoS2_DFFT_serial/` — serial DFPT test data
+  (`electric_field_serial .true.`).
+- `tests/test_callback_reset.py` — same-process multi-Calculator test
+  verifying no stale-callback invocation after close.
+
+### Changed (breaking)
+
+- **Spin-polarized (n_spin=2) data now raises instead of silently reading
+  spin channel 0.** `AimspyMatrix.from_aims_csr` / `to_aims_csr` raise
+  `AimspyError` when `csr_descr.n_spin != 1`; `DeepHData.from_directory`
+  raises `AimspyConfigError` when `info.json` has `spinful: true`.
+  Previously spin channel 1 was silently discarded.
+- **Callback failure now marks the Calculator as FAILED** (was DONE),
+  so DONE-only properties (`hamiltonian`, `energy`, …) are inaccessible
+  after a callback error — results are untrustworthy.
+- `modify_init_ham` / `modify_init_first_order_ham` now raise
+  `AimspyStateError` if called after `init()` / `do()` (previously a
+  silent no-op).
+
+### Fixed
+
+- **`dHde_warmstart_serial.py` buffer layout** — the flat injection buffer
+  is now built as contiguous per-direction chunks (C-order ravel of the
+  transposed array); the previous Fortran-order ravel interleaved the
+  directions, injecting wrong data in serial mode.
+- **`rs_matrix.py` CSR descriptor ABI** — added the missing
+  `n_cells_array` field to `AimsCsrMxDescr.c_struct`, fixing a struct
+  layout mismatch with the Fortran `TAimspyCsrMxDescr`.
+- `DeepHData.from_directory` now validates `atom_pairs` consistency across
+  matrix files, reordering per-pair when the same set is stored in a
+  different order and raising when the pair sets differ.
+- `DeepHData.from_memory` / `set_first_order_hamiltonian` require all
+  three dH/de directions `[x, y, z]` to be non-empty (dH/de is only
+  meaningful when all three are present).
+- `save_first_order_hamiltonian` raises a clear error when the first-order
+  chunk layout is not set.
+- `modify_dHde` validates the `to_aims_csr` output shape before memmove.
+- Fortran: `c_loc` calls in `fill_mx_descr` are now guarded by
+  `allocated()`; `c_f_string` guards against a NULL C pointer; the five
+  matrix dummies in the callback entry points are declared `contiguous`.
+- `Calculator.hamiltonian` is now cached after the first access.
+- Failed `calc()` / `init()` now release large matrices retained in the
+  runtime aux dict (overlap, initial/converged/first-order Hamiltonian,
+  external sources).
+
 - **`DeepHData`: optional `electric_response.h5` (dH/de) export** —
   electric-response first-order Hamiltonian (DFPT) support mirroring the
   existing Hamiltonian warmstart path. New `first_order_hamiltonian_entries` /

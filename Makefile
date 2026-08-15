@@ -88,8 +88,20 @@ test-dHde-inject-defer:
 
 test-dHde: test-dHde-capture test-dHde-inject-direct test-dHde-inject-defer
 
+test-dHde-serial-capture:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_dHde_serial_capture.py
+
+test-dHde-serial-inject:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_dHde_serial_inject.py
+
+test-dHde-serial: test-dHde-serial-capture test-dHde-serial-inject
+
+test-callback-reset:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_callback_reset.py
+
 test-integration: test-baseline test-export-deeph test-warmstart \
-                  test-capture-overlap test-regression test-strategies test-dHde
+                  test-capture-overlap test-regression test-strategies test-dHde \
+                  test-dHde-serial test-callback-reset
 
 test-all: test test-integration
 

@@ -1013,3 +1013,169 @@ class TestCalculatorFirstOrderConfig:
         assert calc._modify_first_order is not None
         assert calc._modify_first_order.deferred_fn is gen_source
         assert calc._modify_first_order.deferred_option == {"path": "/tmp"}
+
+
+# =============================================================================
+# Regression tests: cross-file atom_pairs validation / reordering (2.4)
+# =============================================================================
+class TestAtomPairsReorder:
+    def _write_matrix(self, path, name, atom_pairs, cb, cs, entries):
+        import h5py
+
+        with h5py.File(path / f"{name}.h5", "w") as f:
+            f.create_dataset("atom_pairs", data=atom_pairs, dtype="i4")
+            f.create_dataset("chunk_boundaries", data=cb, dtype="i4")
+            f.create_dataset("chunk_shapes", data=cs, dtype="i4")
+            f.create_dataset("entries", data=entries)
+
+    def _write_meta(self, path):
+        from aimspy.interface.deeph.data import _write_poscar
+        import json as _json
+
+        _write_poscar(
+            path / "POSCAR",
+            np.eye(3) * 10.0,
+            ["Mo", "S", "S"],
+            np.zeros((3, 3)),
+        )
+        info = {
+            "elements_orbital_map": {"Mo": [0, 0, 1], "S": [0, 0]},
+            "orbits_quantity": 5,
+            "spinful": False,
+        }
+        with open(path / "info.json", "w") as f:
+            _json.dump(info, f)
+
+    def test_reorder_same_set_different_order(self, tmp_path):
+        """overlap.h5 with a permuted (but equivalent) atom_pairs is reordered
+        to match hamiltonian.h5's canonical order."""
+        self._write_meta(tmp_path)
+        # canonical: 2 pairs
+        ap = np.array([[0, 0, 0, 0, 0], [0, 0, 0, 0, 1]], dtype=np.int32)
+        cb = np.array([0, 1, 2], dtype=np.int32)
+        cs = np.array([[1, 1], [1, 1]], dtype=np.int32)
+        self._write_matrix(tmp_path, "hamiltonian", ap, cb, cs, np.array([10.0, 20.0]))
+        # overlap: same pairs, reversed order
+        ap2 = ap[::-1].copy()
+        cb2 = np.array([0, 1, 2], dtype=np.int32)
+        cs2 = np.array([[1, 1], [1, 1]], dtype=np.int32)
+        # entries in the reversed order: pair (0,0,0,0,1) first
+        self._write_matrix(tmp_path, "overlap", ap2, cb2, cs2, np.array([0.5, 0.9]))
+        dd = DeepHData.from_directory(tmp_path)
+        # overlap entries reordered to canonical: pair0 (0,0,0,0,0)=0.9,
+        # pair1 (0,0,0,0,1)=0.5
+        np.testing.assert_allclose(dd.overlap_entries, [0.9, 0.5])
+        np.testing.assert_allclose(dd.entries, [10.0, 20.0])
+
+    def test_different_set_raises(self, tmp_path):
+        """overlap.h5 with a *different* pair set raises AimspyConfigError."""
+        from aimspy import AimspyConfigError
+
+        self._write_meta(tmp_path)
+        ap = np.array([[0, 0, 0, 0, 0], [0, 0, 0, 0, 1]], dtype=np.int32)
+        cb = np.array([0, 1, 2], dtype=np.int32)
+        cs = np.array([[1, 1], [1, 1]], dtype=np.int32)
+        self._write_matrix(tmp_path, "hamiltonian", ap, cb, cs, np.array([10.0, 20.0]))
+        # overlap: different pair set
+        ap_bad = np.array([[0, 0, 0, 0, 0], [1, 0, 0, 0, 1]], dtype=np.int32)
+        self._write_matrix(tmp_path, "overlap", ap_bad, cb, cs, np.array([0.5, 0.9]))
+        with pytest.raises(AimspyConfigError):
+            DeepHData.from_directory(tmp_path)
+
+    def test_spinful_info_raises(self, tmp_path):
+        """info.json with spinful:true raises AimspyConfigError."""
+        from aimspy import AimspyConfigError
+        import json as _json
+        from aimspy.interface.deeph.data import _write_poscar
+
+        _write_poscar(
+            tmp_path / "POSCAR",
+            np.eye(3) * 10.0,
+            ["Mo", "S", "S"],
+            np.zeros((3, 3)),
+        )
+        with open(tmp_path / "info.json", "w") as f:
+            _json.dump(
+                {
+                    "elements_orbital_map": {"Mo": [0, 0, 1], "S": [0, 0]},
+                    "spinful": True,
+                },
+                f,
+            )
+        ap = np.array([[0, 0, 0, 0, 0]], dtype=np.int32)
+        cb = np.array([0, 1], dtype=np.int32)
+        cs = np.array([[1, 1]], dtype=np.int32)
+        self._write_matrix(tmp_path, "hamiltonian", ap, cb, cs, np.array([1.0]))
+        with pytest.raises(AimspyConfigError, match="spin"):
+            DeepHData.from_directory(tmp_path)
+
+    def test_electric_response_reorder_3x_blocks(self, tmp_path):
+        """electric_response.h5 with a permuted atom_pairs is reordered using
+        the 3x-expanded chunk boundaries (regression: dst must be fo_cb, not
+        the 1x standard cb)."""
+        self._write_meta(tmp_path)
+        # canonical: 2 pairs, 1x1 blocks
+        ap = np.array([[0, 0, 0, 0, 0], [0, 0, 0, 0, 1]], dtype=np.int32)
+        cb = np.array([0, 1, 2], dtype=np.int32)
+        cs = np.array([[1, 1], [1, 1]], dtype=np.int32)
+        self._write_matrix(tmp_path, "hamiltonian", ap, cb, cs, np.array([10.0, 20.0]))
+
+        # electric_response: SAME pairs but reversed order; each block is
+        # (3*1, 1) = 3 values [y, z, x].  Canonical pair0=(0,0,0,0,0) has
+        # values [1,2,3]; canonical pair1=(0,0,0,0,1) has [4,5,6].  In the
+        # reversed file, pair1 comes first.
+        ap_fo = ap[::-1].copy()
+        fo_cb = np.array([0, 3, 6], dtype=np.int32)
+        fo_cs = np.array([[3, 1], [3, 1]], dtype=np.int32)
+        fo_entries = np.array([4.0, 5.0, 6.0, 1.0, 2.0, 3.0])
+        self._write_matrix(
+            tmp_path, "electric_response", ap_fo, fo_cb, fo_cs, fo_entries
+        )
+
+        dd = DeepHData.from_directory(tmp_path)
+        # After reorder to canonical: pair0=[1,2,3], pair1=[4,5,6]
+        np.testing.assert_allclose(
+            dd.first_order_hamiltonian_entries, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        )
+        # And the rebuilt 3x chunk layout matches the canonical pair order
+        np.testing.assert_array_equal(dd._fo_chunk_boundaries, [0, 3, 6])
+        np.testing.assert_array_equal(dd._fo_chunk_shapes, [[3, 1], [3, 1]])
+
+
+# =============================================================================
+# Regression tests: first_order three-direction completeness (2.6) + save
+# guard (2.7)
+# =============================================================================
+class TestFirstOrderValidation:
+    def test_from_memory_missing_direction_raises(self):
+        """first_order with an empty direction dict raises."""
+        from aimspy import AimspyConfigError
+
+        fo = _make_three_first_order_blocks()
+        fo[1] = {}  # y direction empty
+        with pytest.raises(AimspyConfigError, match="all three directions"):
+            DeepHData.from_memory(
+                lattice=np.eye(3) * 10.0,
+                atom_symbols=["Mo", "S", "S"],
+                atom_coords=np.zeros((3, 3)),
+                elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+                hamiltonian_blocks=_make_simple_blocks(),
+                first_order_hamiltonian_blocks=fo,
+            )
+
+    def test_save_first_order_without_layout_raises(self, tmp_path):
+        """Manually setting entries without _fo_chunk_* raises on save."""
+        from aimspy import AimspyConfigError
+
+        dd = DeepHData.from_memory(
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["Mo", "S", "S"],
+            atom_coords=np.zeros((3, 3)),
+            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            hamiltonian_blocks=_make_simple_blocks(),
+            path=tmp_path,
+        )
+        # Manually set entries but leave _fo_chunk_* as None
+        dd.first_order_hamiltonian_entries = np.zeros(6, dtype=np.float64)
+        with pytest.raises(AimspyConfigError, match="chunk layout"):
+            dd.save_first_order_hamiltonian()

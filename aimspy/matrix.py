@@ -6,7 +6,7 @@ representation:
     blocks: dict[tuple[int, int, int, int, int], np.ndarray]
            key = (R1, R2, R3, i_atom, j_atom)
 
-Convensions
+Conventions
 -----------
 - *R*: ``R_aimspy = -R_aims`` (same sign as DeepH).
 - *Atoms*: aims native order (no reordering).
@@ -120,12 +120,19 @@ class AimspyMatrix:
         3. Apply wiki parity: ``v *= phase_i * phase_j``.
         4. Store block[orb_i, orb_j] and its Hermitian partner.
 
-        .. warning::
-
-            Currently spinless only: only ``h0[0, k]`` (spin channel 0)
-            is read. For ``n_spin=2``, spin channel 1 is silently
-            ignored.
+        Raises
+        ------
+        AimspyError
+            If ``csr_descr.n_spin != 1`` (spin-polarized data is not yet
+            supported; only spin channel 0 would be read).
         """
+        if csr_descr.n_spin != 1:
+            from ._exceptions import AimspyError
+
+            raise AimspyError(
+                f"from_aims_csr: spin-polarized data (n_spin="
+                f"{csr_descr.n_spin}) is not yet supported; n_spin=1 only"
+            )
         phase = structure.phase_factor
         subidx = structure.basis_subidx
         opa = structure.orbit_per_atom
@@ -205,11 +212,19 @@ class AimspyMatrix:
         4. Undo parity: ``v *= phase_i * phase_j`` (self‑inverse).
         5. Return ``(n_spin, n_ham_size)`` C‑contiguous, ready to memmove.
 
-        .. warning::
-
-            Currently spinless only: only ``out[0, k]`` (spin channel 0)
-            is written. For ``n_spin=2``, spin channel 1 is left as zero.
+        Raises
+        ------
+        AimspyError
+            If ``csr_descr.n_spin != 1`` (spin-polarized data is not yet
+            supported; only spin channel 0 would be written).
         """
+        if csr_descr.n_spin != 1:
+            from ._exceptions import AimspyError
+
+            raise AimspyError(
+                f"to_aims_csr: spin-polarized data (n_spin="
+                f"{csr_descr.n_spin}) is not yet supported; n_spin=1 only"
+            )
         phase = structure.phase_factor
         subidx = structure.basis_subidx
 

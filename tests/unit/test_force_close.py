@@ -90,18 +90,16 @@ class TestCallbackManagerClear:
     and that Calculator._clear_all_state() invokes it."""
 
     def test_clear_empties_all_dicts(self):
-        """clear() should empty _wrapped, _auxs, _pyobjs, _errors."""
+        """clear() should empty _wrapped, _auxs, _errors."""
         from aimspy._callbacks.base import CallbackManager
 
         mgr = CallbackManager(binding=None)
         mgr._wrapped["x"] = ("wrapper", "fn")
         mgr._auxs["x"] = {"data": 1}
-        mgr._pyobjs["x"] = "fake_pyobj"
         mgr._errors.append(("x", Exception("test"), "tb"))
         mgr.clear()
         assert mgr._wrapped == {}
         assert mgr._auxs == {}
-        assert mgr._pyobjs == {}
         assert mgr._errors == []
 
     def test_clear_is_idempotent(self):
@@ -200,7 +198,6 @@ class TestNoReferenceCycles:
         # Simulate a registered callback's internal state
         mgr._wrapped["test"] = (object(), lambda ax: None)
         mgr._auxs["test"] = {}
-        mgr._pyobjs["test"] = None
         ref = weakref.ref(mgr)
         mgr.clear()
         del mgr

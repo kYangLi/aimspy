@@ -8,6 +8,10 @@ tests/data/MoS2/_regression_*/
 tests/data/MoS2_DFFT/deeph_dHde_out/
 tests/data/MoS2_DFFT/*.dat
 tests/data/MoS2_DFFT/*.npy
+tests/data/MoS2_DFFT_serial/deeph_dHde_serial_out/
+tests/data/MoS2_DFFT_serial/*.dat
+tests/data/MoS2_DFFT_serial/*.npy
+tests/data/MoS2/deeph_warm/
 examples/*/deeph_data/
 examples/*/deeph_*/
 

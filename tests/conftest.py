@@ -16,4 +16,8 @@ collect_ignore = [
     "test_dHde_capture.py",
     "test_dHde_inject_direct.py",
     "test_dHde_inject_defer.py",
+    "test_dHde_serial_capture.py",
+    "test_dHde_serial_inject.py",
+    "test_callback_reset.py",
+    "test_memory_loop.py",
 ]

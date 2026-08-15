@@ -29,6 +29,9 @@ _PROTOTYPES: dict[str, tuple[list, object]] = {
     "aimspy_init": ([c_int, c_void_p], None),
     "aimspy_run": ([], None),
     "aimspy_finalize": ([], None),
+    # ---- callback deregistration (belt-and-suspenders; also called inside
+    # aimspy_finalize on the Fortran side) ----
+    "aimspy_reset_callbacks": ([], None),
     # ---- info snapshot ----
     "aimspy_get_info": ([], POINTER(AimspyInfoC)),
     # ---- real-space matrix pointers ----

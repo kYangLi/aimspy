@@ -81,9 +81,6 @@ class CallbackManager:
         self._wrapped: dict[str, Tuple[Any, Any]] = {}
         # spec.name -> aux object (the Python object whose id we pass)
         self._auxs: dict[str, Any] = {}
-        # spec.name -> py_object wrapper — must survive to prevent GC
-        # of the buffer used by c_void_p.from_buffer(py_object(aux))
-        self._pyobjs: dict[str, Any] = {}
         # Records callback failures: list of (spec_name, exception, traceback_str)
         self._errors: list[tuple[str, Exception, str]] = []
 
@@ -124,9 +121,10 @@ class CallbackManager:
 
         register_fn = getattr(self._binding, spec.register_symbol)
         if aux is not None:
-            po = py_object(aux)
-            self._pyobjs[spec.name] = po  # keep alive to prevent GC of buffer
-            aux_ptr = c_void_p.from_buffer(po)
+            # Use id(aux) as the pointer value (documented CPython idiom).
+            # _auxs already holds a strong reference to aux, keeping it alive
+            # as long as this CallbackManager exists.
+            aux_ptr = c_void_p(id(aux))
         else:
             aux_ptr = c_void_p(None)
 
@@ -145,7 +143,7 @@ class CallbackManager:
 
     def clear(self) -> None:
         """Release all held references: CFUNCTYPE wrappers, aux objects,
-        py_object anchors, and error records.
+        and error records.
 
         Must be called before dropping the CallbackManager reference to
         ensure immediate refcount-based reclamation of all callback
@@ -155,7 +153,6 @@ class CallbackManager:
         """
         self._wrapped.clear()
         self._auxs.clear()
-        self._pyobjs.clear()
         self._errors.clear()
 
     # ------------------------------------------------------------------
