@@ -11,6 +11,10 @@ tests/data/MoS2_DFPT/*.npy
 tests/data/MoS2_DFPT_serial/deeph_dHde_serial_out/
 tests/data/MoS2_DFPT_serial/*.dat
 tests/data/MoS2_DFPT_serial/*.npy
+tests/data/MoS2_LDA/*.dat
+tests/data/MoS2_LDA/*.npy
+tests/data/MoS2_LDA/*.npz
+tests/data/MoS2_LDA/viz_examples/
 tests/data/MoS2/deeph_warm/
 examples/*/deeph_data/
 examples/*/deeph_*/

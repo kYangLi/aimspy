@@ -17,6 +17,7 @@ from .callback_types import (
     ReconstructMxCb,
     ExportDHdeCb,
     ModifyDHdeCb,
+    ExportGridDataCb,
 )
 
 _log = logging.getLogger(__name__)
@@ -53,6 +54,8 @@ _PROTOTYPES: dict[str, tuple[list, object]] = {
         [ModifyDHdeCb, c_void_p, c_void_p],
         None,
     ),
+    # ---- real-space grid data export ----
+    "aimspy_register_export_grid_data_callback": ([ExportGridDataCb, c_void_p], None),
 }
 
 

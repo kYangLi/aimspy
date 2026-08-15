@@ -59,6 +59,29 @@ better starting point and accelerates CPSCF convergence.
 """
 
 # ---------------------------------------------------------------------------
+# Callback type: export real-space grid data (rho / V_KS / V_KS_0 / ...)
+# ---------------------------------------------------------------------------
+ExportGridDataCb = CFUNCTYPE(
+    None,
+    c_void_p,  # aux
+    c_void_p,  # descr_ptr (TAimspyGridDescr)
+    POINTER(c_double),  # rho   (n_spin, n_full_points)
+    POINTER(c_double),  # vks   (n_spin, n_full_points)  scalar V_KS
+    POINTER(c_double),  # vks0  (n_spin, n_full_points)  scalar V_KS_0
+    POINTER(c_double),  # vh    (n_full_points)          hartree_potential
+    POINTER(c_double),  # vh0   (n_full_points)          free_hartree_superpos
+    POINTER(c_double),  # rho0  (n_full_points)          free_rho_superpos (4*pi)
+)
+"""void(*)(void *aux, void *descr, double *rho, double *vks, double *vks0,
+           double *vh, double *vh0, double *rho0)
+
+Fires once after SCF convergence (per MPI rank).  ``descr`` points to a
+``TAimspyGridDescr`` holding the per-point coords / weights / indices; the
+six physical arrays are this rank's grid-point subset (read-only).  Scalar
+V_KS only (LDA-exact; GGA vector term not exported).
+"""
+
+# ---------------------------------------------------------------------------
 # Callback type: generic Python hook (no extra args beyond aux)
 # ---------------------------------------------------------------------------
 ReconstructMxCb = CFUNCTYPE(None, c_void_p)

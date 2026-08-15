@@ -18,6 +18,7 @@ from .._binding.callback_types import (
     ReconstructMxCb,
     ExportDHdeCb,
     ModifyDHdeCb,
+    ExportGridDataCb,
 )
 from .base import CallbackSpec
 
@@ -36,6 +37,7 @@ class CallbackName(Enum):
     PYTHON_FUNC = "python_func"
     EXPORT_DHDE = "export_dHde"
     MODIFY_DHDE = "modify_dHde"
+    EXPORT_GRID_DATA = "export_grid_data"
 
 
 # =========================================================================
@@ -97,6 +99,14 @@ CALLBACK_SPECS: list[CallbackSpec] = [
         register_arg_count=3,
         trigger_stage="pre_cpscf",
         fortran_module="DFPT_module.f90:1098",
+    ),
+    CallbackSpec(
+        name="export_grid_data",
+        ctypes_type=ExportGridDataCb,
+        register_symbol="aimspy_register_export_grid_data_callback",
+        register_arg_count=2,
+        trigger_stage="post_scf",
+        fortran_module="scf_solver.f90:4919",
     ),
 ]
 

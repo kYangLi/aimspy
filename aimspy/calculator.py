@@ -148,6 +148,13 @@ class CalculatorConfig:
         :attr:`Calculator.first_order_hamiltonian` is available after
         ``calc()`` (requires ``electric_field_response DFPT`` in
         control.in). Default False.
+    capture_grid_data : bool
+        If True, register the ``export_grid_data`` callback so that
+        :attr:`Calculator.grid_data` (this rank's real-space grid subset:
+        coords / weights / ``rho`` / scalar ``vks`` / ``vks0`` / ``vh`` /
+        ``vh0`` / ``rho0``) is available after ``calc()``.  Fires once after
+        SCF convergence.  Scalar V_KS only — exact for LDA; for GGA the
+        non-local vector term is not exported.  Default False.
     """
 
     lib_path: Path | str
@@ -159,6 +166,7 @@ class CalculatorConfig:
     capture_initial_hamiltonian: bool = False
     capture_overlap: bool = False
     capture_first_order_hamiltonian: bool = False
+    capture_grid_data: bool = False
 
     def __post_init__(self):
         self.lib_path = Path(self.lib_path)
@@ -692,6 +700,26 @@ class Calculator:
             return None
         return fo
 
+    @property
+    def grid_data(self):
+        """This rank's real-space grid subset as :class:`GridData`.
+
+        Returns ``None`` unless
+        ``CalculatorConfig.capture_grid_data=True`` was set and the SCF
+        has converged (the callback fires once after convergence).
+
+        Each MPI rank holds its own grid-point subset.  Use
+        ``GridData.gather(calc.grid_data, comm)`` to assemble the global
+        grid on a root rank (returns ``None`` on non-root ranks).
+
+        .. note::
+            ``vks`` is the scalar part of V_KS (``V_H + v_xc``) — exact for
+            LDA; the GGA non-local vector term is not exported.
+        """
+        if self._runtime_aux is None:
+            return None
+        return self._runtime_aux.get("grid_data")
+
     # ==================================================================
     # H0 modification (unified API: direct + deferred)
     # ==================================================================
@@ -1078,6 +1106,7 @@ class Calculator:
             "first_order_hamiltonian",
             "external_aimspy",
             "external_first_order_aimspy",
+            "grid_data",
         ):
             self._runtime_aux[key] = None
 
@@ -1201,6 +1230,7 @@ class Calculator:
             "external_aimspy": None,
             "first_order_hamiltonian": None,
             "external_first_order_aimspy": None,
+            "grid_data": None,  # this rank's real-space grid subset (capture_grid_data)
             "rank": self._rank,
         }
 
@@ -1468,6 +1498,22 @@ class Calculator:
             self._cb_mgr.register(
                 SPECS_BY_NAME["modify_dHde"],
                 _on_modify_first_order_hamiltonian,
+                aux,
+            )
+
+        # 8. export_grid_data — only if capture_grid_data=True
+        if self._cfg.capture_grid_data and not self._cb_mgr.is_registered(
+            "export_grid_data"
+        ):
+
+            def _on_export_grid_data(ax, gd):
+                # The GridData is already stored in ax["grid_data"] by the
+                # wrapper; this default handler only needs to keep it there.
+                ax["grid_data"] = gd
+
+            self._cb_mgr.register(
+                SPECS_BY_NAME["export_grid_data"],
+                _on_export_grid_data,
                 aux,
             )
 

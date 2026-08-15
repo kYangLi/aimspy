@@ -80,3 +80,26 @@ class CsrMxDescrC(Structure):
         ("row_mx_idx", POINTER(c_int)),
         ("col_mx_idx", POINTER(c_int)),
     ]
+
+
+class GridDescrC(Structure):
+    """ctypes mirror of Fortran `TAimspyGridDescr` (callback.f90).
+
+    Field order MUST match the Fortran `type, bind(C) :: TAimspyGridDescr`
+    declaration exactly.  Holds the per-point structure / weights / indices
+    for this rank's grid-point subset; the six physical arrays are passed
+    as separate callback arguments.
+    """
+
+    _fields_ = [
+        ("n_full_points", c_int),
+        ("n_spin", c_int),
+        ("n_atoms", c_int),
+        ("n_my_batches", c_int),
+        ("myid", c_int),
+        ("coords_ptr", c_void_p),
+        ("partition_tab_ptr", c_void_p),
+        ("index_atom_ptr", c_void_p),
+        ("index_radial_ptr", c_void_p),
+        ("index_angular_ptr", c_void_p),
+    ]

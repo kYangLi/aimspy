@@ -19,6 +19,9 @@ Primary entry points:
   :attr:`Calculator.initial_hamiltonian`).
   ``CalculatorConfig.capture_overlap=True`` opts in to capturing the live
   overlap matrix (exposed via :attr:`Calculator.overlap`).
+  ``CalculatorConfig.capture_grid_data=True`` opts in to capturing this
+  rank's real-space integration-grid data (rho / scalar V_KS / V_KS_0 / ...)
+  once after SCF convergence (exposed via :attr:`Calculator.grid_data`).
 
   Logging: INFO and WARNING messages are emitted on rank 0 only; ERROR
   messages are emitted on all ranks for debugging.
@@ -51,6 +54,8 @@ from .data import (
     EV_TO_HARTREE,
     BOHR_TO_ANG,
 )
+from .grid_data import GridData
+from . import viz
 from .structure import AimspyStructure
 from .matrix import (
     AimspyMatrix,
@@ -90,6 +95,8 @@ __all__ = [
     "get_rs_hamiltonian",
     "get_rs_overlap",
     "get_forces",
+    "GridData",
+    "viz",
     "HARTREE_TO_EV",
     "load_info",
     "Strategy",

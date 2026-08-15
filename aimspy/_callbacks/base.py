@@ -281,6 +281,47 @@ class CallbackManager:
                 except Exception as exc:
                     _record_callback_error(errors, spec.name, exc)
 
+        elif spec.name == "export_grid_data":
+
+            def wrapper(
+                aux_ptr: int,
+                descr_ptr: int,
+                rho_ptr,
+                vks_ptr,
+                vks0_ptr,
+                vh_ptr,
+                vh0_ptr,
+                rho0_ptr,
+            ) -> None:
+                _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
+                try:
+                    from ..grid_data import GridData
+
+                    # GridData._from_c copies every array out of the Fortran
+                    # buffers (which may be reused / freed after return).
+                    gd = GridData._from_c(
+                        descr_ptr,
+                        rho_ptr,
+                        vks_ptr,
+                        vks0_ptr,
+                        vh_ptr,
+                        vh0_ptr,
+                        rho0_ptr,
+                    )
+                    # Fill structure fields from the live runtime structure
+                    # (in-memory AimspyInfo via AimspyStructure — NOT from
+                    # input files), keeping the dataset self-consistent with
+                    # the in-memory aims state.
+                    structure = _aux.get("structure")
+                    if structure is not None:
+                        gd.atom_coords = structure.atom_coords
+                        gd.atom_symbols = structure.atom_symbols
+                        gd.lattice = structure.lattice
+                    _aux["grid_data"] = gd
+                    fn(_aux, gd)
+                except Exception as exc:
+                    _record_callback_error(errors, spec.name, exc)
+
         else:
             # Generic fallback: pass unpacked aux only
             def wrapper(aux_ptr: int, *rest) -> None:

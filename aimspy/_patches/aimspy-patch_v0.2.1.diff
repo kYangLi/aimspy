@@ -158,10 +158,10 @@ index 99810d70..960eaa1f 100644
              call localorb_info(info_str, use_unit,'(A)',OL_norm)
 diff --git a/src/aimspy_api/CMakeLists.txt b/src/aimspy_api/CMakeLists.txt
 new file mode 100644
-index 00000000..4abdeabf
+index 00000000..b1e497f4
 --- /dev/null
 +++ b/src/aimspy_api/CMakeLists.txt
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,16 @@
 +# AimSpy API
 +# These files are added to aims1, same layer as ASI API files.
 +
@@ -170,6 +170,7 @@ index 00000000..4abdeabf
 +    ${CMAKE_CURRENT_LIST_DIR}/api_bank.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/info.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/register.f90
++    ${CMAKE_CURRENT_LIST_DIR}/export_grid_data.f90
 +)
 +
 +if(BUILD_SHARED_LIBS)
@@ -287,10 +288,10 @@ index 00000000..9fd1eb1e
 \ No newline at end of file
 diff --git a/src/aimspy_api/callback.f90 b/src/aimspy_api/callback.f90
 new file mode 100644
-index 00000000..caf80bf0
+index 00000000..79dfb807
 --- /dev/null
 +++ b/src/aimspy_api/callback.f90
-@@ -0,0 +1,454 @@
+@@ -0,0 +1,543 @@
 +module aimspy_callback
 +
 +    use iso_c_binding
@@ -299,6 +300,8 @@ index 00000000..caf80bf0
 +
 +    public :: TAimspyCallback
 +    public :: TAimspyCsrMxDescr
++    public :: TAimspyGridDescr
++    public :: grid_descr_storage
 +
 +
 +        type, bind(c) :: TAimspyCsrMxDescr
@@ -312,6 +315,25 @@ index 00000000..caf80bf0
 +            type(c_ptr)  :: row_mx_idx   = c_null_ptr  ! index_hamiltonian, shape (2, n_cells, n_basis)
 +            type(c_ptr)  :: col_mx_idx   = c_null_ptr  ! column_index_hamiltonian, shape (n_ham_size)
 +        end type TAimspyCsrMxDescr
++
++        ! Descriptor for the real-space integration grid (per MPI rank).
++        ! Field order MUST match the Python-side ctypes.Structure mirror
++        ! exactly (see pyapi/aimspy/_binding/ctypes_types.py GridDescrC).
++        ! Physical arrays (rho / vks / vks0 / vh / vh0 / rho0) are passed as
++        ! separate callback arguments, NOT through this descriptor.
++        type, bind(c) :: TAimspyGridDescr
++            integer(c_int) :: n_full_points   ! grid points owned by this rank
++            integer(c_int) :: n_spin
++            integer(c_int) :: n_atoms
++            integer(c_int) :: n_my_batches
++            integer(c_int) :: myid            ! MPI rank owning this subset
++
++            type(c_ptr)  :: coords_ptr        = c_null_ptr  ! (3, n_full_points) bohr
++            type(c_ptr)  :: partition_tab_ptr = c_null_ptr  ! (n_full_points) bohr^3
++            type(c_ptr)  :: index_atom_ptr    = c_null_ptr  ! (n_full_points) int, 1-based
++            type(c_ptr)  :: index_radial_ptr  = c_null_ptr  ! (n_full_points) int, 1-based
++            type(c_ptr)  :: index_angular_ptr = c_null_ptr  ! (n_full_points) int, 1-based
++        end type TAimspyGridDescr
 +
 +        type :: TAimspyCallback
 +            
@@ -350,6 +372,10 @@ index 00000000..caf80bf0
 +            type(c_ptr),    private :: modify_dHde_input_mx_ptr = c_null_ptr
 +            logical,        public  :: modify_dHde_registered = .false.
 +
++            ! export real-space grid data (rho / V_KS / V_KS_0 / ...)
++            type(c_funptr), private :: export_grid_data_callback = c_null_funptr
++            type(c_ptr),    private :: export_grid_data_aux_ptr  = c_null_ptr
++
 +
 +          contains
 +            ! ============== [2]. register methods and calling functins ==================
@@ -373,6 +399,9 @@ index 00000000..caf80bf0
 +
 +            procedure :: register_modify_dHde
 +            procedure :: modify_dHde_func
++
++            procedure :: register_export_grid_data
++            procedure :: export_grid_data_func
 +
 +            procedure :: reset_all
 +
@@ -444,9 +473,30 @@ index 00000000..caf80bf0
 +            end subroutine aimspy_modify_dHde_cb_t
 +        end interface
 +
++        ! ---- export_grid_data: fires once after SCF convergence (per rank) ----
++        ! Physical arrays are passed as separate c_ptr arguments (read-only,
++        ! intent(in)).  Shapes (all Fortran column-major):
++        !   rho / vks / vks0 : (n_spin, n_full_points)
++        !   vh / vh0 / rho0  : (n_full_points)   [rho0 = free_rho_superpos = 4*pi*rho_0]
++        abstract interface
++            subroutine aimspy_export_grid_cb_t(aux_ptr, descr_ptr, &
++                rho_ptr, vks_ptr, vks0_ptr, vh_ptr, vh0_ptr, rho0_ptr) bind(c)
++                use iso_c_binding
++                type(c_ptr), value :: aux_ptr
++                type(c_ptr), value :: descr_ptr  ! TAimspyGridDescr
++                type(c_ptr), value :: rho_ptr
++                type(c_ptr), value :: vks_ptr
++                type(c_ptr), value :: vks0_ptr
++                type(c_ptr), value :: vh_ptr
++                type(c_ptr), value :: vh0_ptr
++                type(c_ptr), value :: rho0_ptr
++            end subroutine aimspy_export_grid_cb_t
++        end interface
++
 +        ! =================== end [3]. ======================================
 +
 +        type(TAimspyCsrMxDescr), target :: descr_storage
++        type(TAimspyGridDescr), target :: grid_descr_storage
 +
 +    contains
 +            
@@ -705,6 +755,43 @@ index 00000000..caf80bf0
 +                                int(j_coord, c_int))
 +            end subroutine modify_dHde_func
 +
++            subroutine register_export_grid_data(this, callback_funptr, aux_ptr)
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                type(c_funptr), value :: callback_funptr
++                type(c_ptr), value :: aux_ptr
++                this%export_grid_data_callback = callback_funptr
++                this%export_grid_data_aux_ptr  = aux_ptr
++            end subroutine register_export_grid_data
++
++            ! Fire the export_grid_data callback.  The descriptor is filled by
++            ! the caller (aimspy_export_grid_data module) before invoking this
++            ! via export_grid_data_func.  All physical arrays are read-only.
++            subroutine export_grid_data_func(this, rho, vks, vks0, vh, vh0, rho0)
++                use iso_c_binding
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                real*8, intent(in), target, contiguous :: rho(:,:)
++                real*8, intent(in), target, contiguous :: vks(:,:)
++                real*8, intent(in), target, contiguous :: vks0(:,:)
++                real*8, intent(in), target, contiguous :: vh(:)
++                real*8, intent(in), target, contiguous :: vh0(:)
++                real*8, intent(in), target, contiguous :: rho0(:)
++                procedure(aimspy_export_grid_cb_t), pointer :: callback_proc
++
++                if (.not. c_associated(this%export_grid_data_callback)) return
++
++                call c_f_procpointer(this%export_grid_data_callback, callback_proc)
++                call callback_proc(this%export_grid_data_aux_ptr, &
++                                c_loc(grid_descr_storage), &
++                                c_loc(rho(1,1)), &
++                                c_loc(vks(1,1)), &
++                                c_loc(vks0(1,1)), &
++                                c_loc(vh(1)), &
++                                c_loc(vh0(1)), &
++                                c_loc(rho0(1)))
++            end subroutine export_grid_data_func
++
 +            ! Reset all registered callbacks, aux pointers, input pointers,
 +            ! and registered-flags.  Called from aimspy_finalize (and exposed
 +            ! via aimspy_reset_callbacks) so that a second Calculator in the
@@ -741,10 +828,241 @@ index 00000000..caf80bf0
 +                this%modify_dHde_input_mx_ptr = c_null_ptr
 +                this%modify_dHde_registered = .false.
 +
++                this%export_grid_data_callback = c_null_funptr
++                this%export_grid_data_aux_ptr  = c_null_ptr
++
 +            end subroutine reset_all
 +
 +
 +end module aimspy_callback
+diff --git a/src/aimspy_api/export_grid_data.f90 b/src/aimspy_api/export_grid_data.f90
+new file mode 100644
+index 00000000..53c3d69c
+--- /dev/null
++++ b/src/aimspy_api/export_grid_data.f90
+@@ -0,0 +1,222 @@
++!****h* aimspy_api/export_grid_data
++!  PURPOSE
++!    Assemble the real-space integration-grid descriptor and the scalar
++!    Kohn-Sham potential (V_KS) / reference free-atom potential (V_KS_0)
++!    on this MPI rank's grid-point subset, then fire the aimspy
++!    ``export_grid_data`` callback.
++!
++!    Scope (LDA / scalar only, per the current design decision):
++!      - The GGA non-local (vector) term ``4*xc_gradient_deriv`` is NOT
++!        exported.  ``vks`` therefore contains only the scalar part
++!        ``V_H + v_xc`` which is EXACT for LDA, and the scalar part for GGA.
++!      - Fired once after SCF convergence (no per-iteration export).
++!
++!  DESIGN
++!    - Mirrors the proven module-level ``save`` buffer pattern of
++!      ``info.f90`` / ``api_bank.f90``: re-filled on every call, so the
++!      pointers handed to Python never dangle.
++!    - Physical arrays already alive in ``physics`` (rho, hartree_potential,
++!      free_hartree_superpos, free_rho_superpos) are passed straight through
++!      to the callback via c_loc (zero-copy; Python copies immediately).
++!    - Derived quantities (vks / vks0) and the per-point structural arrays
++!      (coords / indices / weights) are copied into module-level buffers
++!      because they are built fresh inside this routine.
++!
++!  UNITS / CONVENTIONS
++!    - coords: bohr; partition_tab: bohr^3; potentials: Hartree; rho: e/bohr^3.
++!    - free_rho_superpos carries a factor 4*pi (rho_0 = pi4_inv * free_rho_superpos).
++!    - hartree_potential / free_hartree_superpos BOTH include the nuclear
++!      attraction (they are full electrostatic potentials, see
++!      analysis docs): hartree_potential = V_H + V_nuc (self-consistent),
++!      free_hartree_superpos = V_H^free + V_nuc.
++!******
++module aimspy_export_grid_data
++  use iso_c_binding
++  implicit none
++  private
++
++  public :: aimspy_export_grid_data_run
++  public :: aimspy_export_grid_data_finalize
++  public :: aimspy_store_vdw_potential
++
++  ! ===== module-level single-instance buffers (lifetime = process) =====
++  ! Re-filled (deallocate + allocate + copy) on every call so the c_ptr
++  ! handed to Python is always valid during the callback.
++  real(c_double), allocatable, target, save :: coords_buf(:)
++  real(c_double), allocatable, target, save :: ptab_buf(:)
++  integer(c_int), allocatable, target, save :: iatom_buf(:)
++  integer(c_int), allocatable, target, save :: iradial_buf(:)
++  integer(c_int), allocatable, target, save :: iangular_buf(:)
++  real(c_double), allocatable, target, save :: vks_buf(:)
++  real(c_double), allocatable, target, save :: vks0_buf(:)
++
++  ! vdW potential buffer (filled by integrate_hamiltonian_matrix_p2 during
++  ! SCF; added to vks_buf at export time).  Only allocated when vdW is
++  ! active; otherwise the export falls back to vdw_term = 0.
++  real(c_double), allocatable, target, save :: c_vdw_potential(:)
++
++contains
++
++  subroutine aimspy_export_grid_data_run()
++    use dimensions,       only: n_full_points, n_spin, n_atoms, n_my_batches, &
++                                n_periodic
++    use grids,            only: batches
++    use physics,          only: rho, rho_gradient, kinetic_density,           &
++                                hartree_potential, free_hartree_superpos,     &
++                                free_rho_superpos, free_rho_gradient_superpos,&
++                                partition_tab
++    use mpi_tasks,        only: myid
++    use constants,        only: pi4_inv
++    use aimspy_callback,  only: grid_descr_storage
++    use aimspy_api_bank,  only: aimspy_callback_hd
++    implicit none
++
++    integer  :: i_point, i_my_batch, i_index, ispin, n
++    real*8   :: coord(3)
++    real*8   :: rhoF
++    real*8   :: vdw_term
++    ! evaluate_xc outputs (full 11-arg signature, matching
++    ! integrate_hamiltonian_matrix_p2.f90; the unused energy/gradient/tau
++    ! outputs are scratch dummies).
++    real*8   :: en_xc, en_x(n_spin), en_c
++    real*8   :: v_xc(n_spin), grad_deriv(3, n_spin), tau_deriv(n_spin)
++    real*8   :: en_xc0, en_x0(n_spin), en_c0
++    real*8   :: v_xc0(n_spin), grad_deriv0(3, n_spin), tau_deriv0(n_spin)
++    real*8   :: gradF(3, n_spin)
++
++    n = n_full_points
++
++    ! ---- (re)allocate module-level buffers ----
++    if (allocated(coords_buf))   deallocate(coords_buf)
++    if (allocated(ptab_buf))     deallocate(ptab_buf)
++    if (allocated(iatom_buf))    deallocate(iatom_buf)
++    if (allocated(iradial_buf))  deallocate(iradial_buf)
++    if (allocated(iangular_buf)) deallocate(iangular_buf)
++    if (allocated(vks_buf))      deallocate(vks_buf)
++    if (allocated(vks0_buf))     deallocate(vks0_buf)
++
++    allocate(coords_buf(3 * n))
++    allocate(ptab_buf(n))
++    allocate(iatom_buf(n))
++    allocate(iradial_buf(n))
++    allocate(iangular_buf(n))
++    allocate(vks_buf(n_spin * n))
++    allocate(vks0_buf(n_spin * n))
++
++    ! ---- walk this rank's grid points (same indexing as
++    !      output_effective_potential.f90: i_point runs 1..n_full_points and
++    !      matches the 2nd dimension of rho / partition_tab / hartree_potential)
++    i_point = 0
++    do i_my_batch = 1, n_my_batches
++       do i_index = 1, batches(i_my_batch)%size
++          i_point = i_point + 1
++
++          coord(:) = batches(i_my_batch)%points(i_index)%coords(:)
++          if (n_periodic > 0) call map_to_center_cell(coord(1:3))
++
++          coords_buf(3*(i_point-1)+1 : 3*i_point) = coord(:)
++          ptab_buf(i_point)     = partition_tab(i_point)
++          iatom_buf(i_point)    = int(batches(i_my_batch)%points(i_index)%index_atom,    c_int)
++          iradial_buf(i_point)  = int(batches(i_my_batch)%points(i_index)%index_radial,  c_int)
++          iangular_buf(i_point) = int(batches(i_my_batch)%points(i_index)%index_angular, c_int)
++
++          ! ---- V_xc for the self-consistent density (full 11-arg call) ----
++          call evaluate_xc(rho(1,i_point), rho_gradient(1,1,i_point), &
++               kinetic_density(1,i_point), en_xc, en_x, en_c, &
++               v_xc(1), grad_deriv(1,1), tau_deriv(1), .false., coord(1:3))
++
++          ! ---- V_xc for the free-atom superposition density ----
++          ! rho_0 = pi4_inv * free_rho_superpos  (4*pi convention).
++          ! free_rho_gradient_superpos is (3, n_full_points) with NO spin dim;
++          ! broadcast it to (3, n_spin) for the gradient argument (unused for
++          ! LDA but required by the interface).
++          rhoF = pi4_inv * free_rho_superpos(i_point)
++          do ispin = 1, n_spin
++             gradF(:, ispin) = free_rho_gradient_superpos(:, i_point)
++          end do
++          call evaluate_xc(rhoF, gradF(1,1), kinetic_density(1,i_point), &
++               en_xc0, en_x0, en_c0, v_xc0(1), grad_deriv0(1,1), &
++               tau_deriv0(1), .false., coord(1:3))
++
++          ! ---- assemble scalar V_KS and V_KS_0 (LDA-exact; GGA scalar part) --
++          ! Fortran column-major (n_spin, n_full_points): element (ispin, i_point)
++          ! is at flat index (ispin-1)*1 + (i_point-1)*n_spin.  We store the
++          ! buffers in that same column-major order so the Python side can
++          ! reshape (n_spin, n, order='F').
++          !
++          ! vks  = V_H + V_nuc + v_xc [+ v_vdw]  (self-consistent density)
++          ! vks0 = V_H^free + V_nuc + v_xc^free   (free-atom reference; NO vdW)
++          if (allocated(c_vdw_potential)) then
++             vdw_term = c_vdw_potential(i_point)
++          else
++             vdw_term = 0.0d0
++          end if
++          do ispin = 1, n_spin
++             vks_buf((i_point-1)*n_spin + ispin)  = hartree_potential(i_point)      + v_xc(ispin) + vdw_term
++             vks0_buf((i_point-1)*n_spin + ispin) = free_hartree_superpos(i_point) + v_xc0(ispin)
++          end do
++       end do
++    end do
++
++    ! ---- fill descriptor ----
++    grid_descr_storage%n_full_points = int(n, c_int)
++    grid_descr_storage%n_spin        = int(n_spin, c_int)
++    grid_descr_storage%n_atoms       = int(n_atoms, c_int)
++    grid_descr_storage%n_my_batches  = int(n_my_batches, c_int)
++    grid_descr_storage%myid          = int(myid, c_int)
++
++    grid_descr_storage%coords_ptr        = c_loc(coords_buf(1))
++    grid_descr_storage%partition_tab_ptr = c_loc(ptab_buf(1))
++    grid_descr_storage%index_atom_ptr    = c_loc(iatom_buf(1))
++    grid_descr_storage%index_radial_ptr  = c_loc(iradial_buf(1))
++    grid_descr_storage%index_angular_ptr = c_loc(iangular_buf(1))
++
++    ! ---- fire the callback (no-op if not registered) ----
++    ! Argument order matches export_grid_data_func(rho, vks, vks0, vh, vh0, rho0).
++    ! vks / vks0 passed as (n_spin, n) views of the column-major buffers;
++    ! rho / vh / vh0 / rho0 come straight from physics (zero-copy).
++    call aimspy_callback_hd%export_grid_data_func( &
++         rho, &
++         reshape(vks_buf,  [n_spin, n]), &
++         reshape(vks0_buf, [n_spin, n]), &
++         hartree_potential, free_hartree_superpos, free_rho_superpos)
++
++  end subroutine aimspy_export_grid_data_run
++
++  ! ----------------------------------------------------------------------
++  ! Store the vdW potential computed during SCF (called from
++  ! integrate_hamiltonian_matrix_p2 after all vdW sources are summed).
++  ! Only called when aimspy is initialized AND vdW is active.
++  ! ----------------------------------------------------------------------
++  subroutine aimspy_store_vdw_potential(vdw_pot, n_points)
++    implicit none
++    real*8, intent(in) :: vdw_pot(n_points)
++    integer, intent(in) :: n_points
++
++    if (.not. allocated(c_vdw_potential)) then
++       allocate(c_vdw_potential(n_points))
++    else if (size(c_vdw_potential) /= n_points) then
++       deallocate(c_vdw_potential)
++       allocate(c_vdw_potential(n_points))
++    end if
++    c_vdw_potential(1:n_points) = vdw_pot(1:n_points)
++  end subroutine aimspy_store_vdw_potential
++
++  ! ----------------------------------------------------------------------
++  ! Explicitly deallocate all module-level buffers.  Called from
++  ! aimspy_finalize so the Fortran side does not hold ~500 MB of grid
++  ! data after the Calculator is closed.
++  ! ----------------------------------------------------------------------
++  subroutine aimspy_export_grid_data_finalize()
++    implicit none
++    if (allocated(coords_buf))      deallocate(coords_buf)
++    if (allocated(ptab_buf))        deallocate(ptab_buf)
++    if (allocated(iatom_buf))       deallocate(iatom_buf)
++    if (allocated(iradial_buf))     deallocate(iradial_buf)
++    if (allocated(iangular_buf))    deallocate(iangular_buf)
++    if (allocated(vks_buf))         deallocate(vks_buf)
++    if (allocated(vks0_buf))        deallocate(vks0_buf)
++    if (allocated(c_vdw_potential)) deallocate(c_vdw_potential)
++  end subroutine aimspy_export_grid_data_finalize
++
++end module aimspy_export_grid_data
 diff --git a/src/aimspy_api/info.f90 b/src/aimspy_api/info.f90
 new file mode 100644
 index 00000000..59c44dd4
@@ -1084,10 +1402,10 @@ index 00000000..59c44dd4
 +end module aimspy_info
 diff --git a/src/aimspy_api/main.f90 b/src/aimspy_api/main.f90
 new file mode 100644
-index 00000000..4e266fe4
+index 00000000..0179e316
 --- /dev/null
 +++ b/src/aimspy_api/main.f90
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,90 @@
 +module aimspy_main
 +
 +    use iso_c_binding
@@ -1149,9 +1467,14 @@ index 00000000..4e266fe4
 +
 +    subroutine aimspy_finalize()  bind(c, name="aimspy_finalize")
 +        use aimspy_api_bank, only: aimspy_converged_scf, aimspy_callback_hd
++        use aimspy_export_grid_data, only: aimspy_export_grid_data_finalize
 +        implicit none
 +
 +        call aims_finalize(aimspy_converged_scf)
++
++        ! Deallocate grid-export buffers (coords / vks / vks0 / vdW) so the
++        ! Fortran side does not hold ~500 MB of grid data after close.
++        call aimspy_export_grid_data_finalize()
 +
 +        ! Reset all callback funptrs / flags so a second Calculator in the
 +        ! same process never calls a dangling Python function pointer left
@@ -1176,10 +1499,10 @@ index 00000000..4e266fe4
 \ No newline at end of file
 diff --git a/src/aimspy_api/register.f90 b/src/aimspy_api/register.f90
 new file mode 100644
-index 00000000..626ac0d6
+index 00000000..9b00972e
 --- /dev/null
 +++ b/src/aimspy_api/register.f90
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,91 @@
 +module aimspy_callback_register
 +    use iso_c_binding
 +    use aimspy_api_bank, only : aimspy_callback_hd
@@ -1193,6 +1516,7 @@ index 00000000..626ac0d6
 +    public :: aimspy_register_python_callback
 +    public :: aimspy_register_export_dHde_callback
 +    public :: aimspy_register_modify_dHde_callback
++    public :: aimspy_register_export_grid_data_callback
 +    public :: aimspy_reset_callbacks
 +
 +    contains
@@ -1253,6 +1577,13 @@ index 00000000..626ac0d6
 +        type(c_ptr), value :: input_mx_ptr
 +        call aimspy_callback_hd%register_modify_dHde(callback_funptr, aux_ptr, input_mx_ptr)
 +    end subroutine aimspy_register_modify_dHde_callback
++
++    subroutine aimspy_register_export_grid_data_callback(callback_funptr, aux_ptr) &
++        bind(c, name="aimspy_register_export_grid_data_callback")
++        type(c_funptr), value :: callback_funptr
++        type(c_ptr), value :: aux_ptr
++        call aimspy_callback_hd%register_export_grid_data(callback_funptr, aux_ptr)
++    end subroutine aimspy_register_export_grid_data_callback
 +
 +    ! Reset all registered callbacks (belt-and-suspenders in addition to the
 +    ! reset inside aimspy_finalize).  Python calls this from
@@ -1377,6 +1708,33 @@ index 7a51c788..18637a26 100644
              ! Restart with ELSI
              restart_zero_iteration = .true.
          else
+diff --git a/src/integrate_hamiltonian_matrix_p2.f90 b/src/integrate_hamiltonian_matrix_p2.f90
+index 4d1581ad..f9d3c5f2 100644
+--- a/src/integrate_hamiltonian_matrix_p2.f90
++++ b/src/integrate_hamiltonian_matrix_p2.f90
+@@ -1036,6 +1036,22 @@ subroutine integrate_real_hamiltonian_matrix_p2 &
+       call libmbd_calculate(en_vdw, potential=vdw_potential)
+   end if
+ 
++  ! ---- aimspy: store vdW potential for post-SCF grid export ----
++  ! vdw_potential is now the sum of all active vdW sources (Hirshfeld-SC,
++  ! MBD-std, libMBD).  Store it so that aimspy_export_grid_data can add it
++  ! to the exported V_KS without recomputing.
++  block
++    use aimspy_api_bank, only: aimspy_initialized
++    use aimspy_export_grid_data, only: aimspy_store_vdw_potential
++    logical :: use_vdw
++    use_vdw = use_vdw_correction_hirshfeld_sc .or. &
++              (use_mbd_std .and. mbd_self_consistent) .or. &
++              (use_libmbd .and. libmbd_self_consistent)
++    if (aimspy_initialized .and. use_vdw) then
++       call aimspy_store_vdw_potential(vdw_potential, my_n_full_points)
++    end if
++  end block
++
+   ! initialize index_lm
+   i_index = 0
+   do i_l = 0, l_wave_max, 1
 diff --git a/src/pbc_lists.f90 b/src/pbc_lists.f90
 index 24f73f67..b319ae14 100644
 --- a/src/pbc_lists.f90
@@ -1403,7 +1761,7 @@ index 24f73f67..b319ae14 100644
    integer, dimension(:,:), allocatable :: cell_index_pairs !SVL It is needed because the set of
                                                             ! active supercell can be different
 diff --git a/src/scf_solver.f90 b/src/scf_solver.f90
-index b6fadba9..7d88f873 100644
+index b6fadba9..8635dbca 100644
 --- a/src/scf_solver.f90
 +++ b/src/scf_solver.f90
 @@ -252,6 +252,7 @@
@@ -1445,3 +1803,20 @@ index b6fadba9..7d88f873 100644
           ! do double-hybrid density functional calculations, IGOR
           if ((use_dftpt2 .or. use_dftpt2_qpe) .and. .not. use_meta_gga_post) then
               total_energy_old = total_energy
+@@ -4902,6 +4918,16 @@
+ 
+          end if
+ 
++         ! ---- aimspy export_grid_data (per-rank, once after SCF convergence) ----
++         ! No-op unless the Python side registered the export_grid_data callback.
++         block
++           use aimspy_api_bank, only : aimspy_initialized
++           use aimspy_export_grid_data, only : aimspy_export_grid_data_run
++           if (aimspy_initialized) then
++              call aimspy_export_grid_data_run()
++           end if
++         end block
++
+          if(flag_neutral_excitation) then
+             call optical_response()
+          end if
