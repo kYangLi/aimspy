@@ -6,7 +6,7 @@ cycles — one per Cartesian direction (j_coord = 1/2/3 = x/y/z) — instead
 of a single full-memory CPSCF over all three directions at once.
 
 This test is SELF-CONTAINED: it first runs a full-memory capture (the
-reference) in ``MoS2_DFFT/`` then a serial capture in ``MoS2_DFFT_serial/``,
+reference) in ``MoS2_DFPT/`` then a serial capture in ``MoS2_DFPT_serial/``,
 and cross-validates that the two physically-equivalent dH/de tensors agree.
 
 Verifies:
@@ -24,7 +24,7 @@ Verifies:
      round-trip IS exact, atol=1e-10, since it is pure I/O).
 
 The serial deeph product is saved to
-``MoS2_DFFT_serial/deeph_dHde_serial_out/`` for use by
+``MoS2_DFPT_serial/deeph_dHde_serial_out/`` for use by
 ``test_dHde_serial_inject.py``.
 
 Usage:
@@ -49,8 +49,8 @@ from aimspy import Calculator, CalculatorConfig
 from aimspy import DeepHData
 
 HERE = Path(__file__).resolve().parent
-FULL_DIR = HERE / "data" / "MoS2_DFFT"  # full-memory reference
-SERIAL_DIR = HERE / "data" / "MoS2_DFFT_serial"  # serial run
+FULL_DIR = HERE / "data" / "MoS2_DFPT"  # full-memory reference
+SERIAL_DIR = HERE / "data" / "MoS2_DFPT_serial"  # serial run
 SERIAL_DEEPH_DIR = SERIAL_DIR / "deeph_dHde_serial_out"
 
 FULL_LOG = "aims_dHde_serial_ref_full.out"
@@ -122,7 +122,7 @@ all_ok = True
 # Step 1: Full-memory capture (reference)
 # =============================================================================
 _info("=" * 60)
-_info("Step 1: Full-memory capture (reference) — MoS2_DFFT")
+_info("Step 1: Full-memory capture (reference) — MoS2_DFPT")
 _info("=" * 60)
 
 fo_full, H_full, struct_full = _run_capture(FULL_DIR, FULL_LOG)
@@ -139,7 +139,7 @@ if rank == 0:
 # =============================================================================
 _info("")
 _info("=" * 60)
-_info("Step 2: Serial capture — MoS2_DFFT_serial")
+_info("Step 2: Serial capture — MoS2_DFPT_serial")
 _info("=" * 60)
 
 fo_serial, H_serial, struct_serial = _run_capture(SERIAL_DIR, SERIAL_LOG)

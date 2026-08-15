@@ -8,7 +8,7 @@ deeph_dHde_out/electric_response.h5 via DeepHData.from_aimspy.
 Also cross-validates: dHde roundtrip + HDF5 format + unit conversion.
 
 Prerequisites:
-    tests/data/MoS2_DFFT/control.in with electric_field_response DFPT
+    tests/data/MoS2_DFPT/control.in with electric_field_response DFPT
 
 Usage:
     source /path/to/intel/setvars.sh
@@ -33,7 +33,7 @@ from aimspy import Calculator, CalculatorConfig
 from aimspy import DeepHData
 
 HERE = Path(__file__).resolve().parent
-DATA_DIR = HERE / "data" / "MoS2_DFFT"
+DATA_DIR = HERE / "data" / "MoS2_DFPT"
 DEEPH_DIR = DATA_DIR / "deeph_dHde_out"
 
 comm = MPI.COMM_WORLD

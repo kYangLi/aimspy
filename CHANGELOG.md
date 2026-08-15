@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/test_dHde_serial_inject.py` — serial warmstart test: injects the
   serial capture product and verifies per-direction CPSCF iteration counts
   are reduced (MoS2: [11,12,12] → [2,2,4]).
-- `tests/data/MoS2_DFFT_serial/` — serial DFPT test data
+- `tests/data/MoS2_DFPT_serial/` — serial DFPT test data
   (`electric_field_serial .true.`).
 - `tests/test_callback_reset.py` — same-process multi-Calculator test
   verifying no stale-callback invocation after close.

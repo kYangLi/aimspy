@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Integration test: DFPT dH/de warmstart in SERIAL mode (REPLACE inject).
 
-Loads the serial deeph product (``MoS2_DFFT_serial/deeph_dHde_serial_out/``,
+Loads the serial deeph product (``MoS2_DFPT_serial/deeph_dHde_serial_out/``,
 produced by ``test_dHde_serial_capture.py``) and injects it via
 ``modify_init_first_order_ham(source=, REPLACE)`` in serial mode
 (``electric_field_serial .true.``).
@@ -39,7 +39,7 @@ from aimspy import Calculator, CalculatorConfig, Strategy
 from aimspy import DeepHData
 
 HERE = Path(__file__).resolve().parent
-SERIAL_DIR = HERE / "data" / "MoS2_DFFT_serial"
+SERIAL_DIR = HERE / "data" / "MoS2_DFPT_serial"
 SERIAL_DEEPH_DIR = SERIAL_DIR / "deeph_dHde_serial_out"
 
 # capture log produced by test_dHde_serial_capture.py (serial baseline)

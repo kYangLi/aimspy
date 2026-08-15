@@ -31,7 +31,7 @@ from aimspy import Calculator, CalculatorConfig, Strategy
 from aimspy import DeepHData
 
 HERE = Path(__file__).resolve().parent
-DATA_DIR = HERE / "data" / "MoS2_DFFT"
+DATA_DIR = HERE / "data" / "MoS2_DFPT"
 DEEPH_DIR = DATA_DIR / "deeph_dHde_out"
 CAPTURE_LOG = "aims_dHde_capture.out"
 INJECT_LOG = "aims_dHde_inject_defer.out"

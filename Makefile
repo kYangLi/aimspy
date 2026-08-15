@@ -133,11 +133,11 @@ clean:
 	rm -rf .pytest_cache .ruff_cache .coverage dist build 2>/dev/null || true
 	rm -f aimspy/_aims*.so aimspy/_aims*.pyd 2>/dev/null || true
 	rm -rf tests/data/MoS2/deeph_out tests/data/MoS2/_regression_* 2>/dev/null || true
-	rm -rf tests/data/MoS2_DFFT/deeph_dHde_out 2>/dev/null || true
+	rm -rf tests/data/MoS2_DFPT/deeph_dHde_out 2>/dev/null || true
 	rm -f tests/data/MoS2/*.out 2>/dev/null || true
-	rm -f tests/data/MoS2_DFFT/*.out 2>/dev/null || true
-	rm -f tests/data/MoS2_DFFT/*.dat 2>/dev/null || true
-	rm -f tests/data/MoS2_DFFT/*.npy 2>/dev/null || true
+	rm -f tests/data/MoS2_DFPT/*.out 2>/dev/null || true
+	rm -f tests/data/MoS2_DFPT/*.dat 2>/dev/null || true
+	rm -f tests/data/MoS2_DFPT/*.npy 2>/dev/null || true
 	rm -rf examples/*/deeph_data 2>/dev/null || true
 	rm -f examples/*/*.out 2>/dev/null || true
 	@echo "Clean complete!"
