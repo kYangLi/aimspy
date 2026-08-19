@@ -1,8 +1,11 @@
 """aimspy command-line interface.
 
-Click-based.  Currently provides ``aimspy patch`` for managing the bundled
-FHI-aims patch (apply / uninstall / dry-run / list).  The patch logic itself
-lives in :mod:`aimspy._patches._apply`; this module is a thin front-end.
+Click-based.  Provides:
+
+* ``aimspy patch`` — manage the bundled FHI-aims patch (apply / uninstall /
+  dry-run / list); logic lives in :mod:`aimspy._patches._apply`.
+* ``aimspy viz-basis`` / ``aimspy viz-grid`` — visualization front-ends
+  (implemented in :mod:`aimspy._cli_viz`, registered below).
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from pathlib import Path
 
 import click
 
+from ._cli_viz import viz_basis_cmd, viz_grid_cmd
 from ._patches import _apply
 from ._version import __version__
 
@@ -21,6 +25,10 @@ from ._version import __version__
 @click.version_option(__version__, prog_name="aimspy")
 def main() -> None:
     """aimspy command-line tools."""
+
+
+main.add_command(viz_basis_cmd)
+main.add_command(viz_grid_cmd)
 
 
 @main.command()

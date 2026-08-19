@@ -23,6 +23,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/unit/test_grid_data.py` (19 tests), `tests/unit/test_viz.py`
   (20 tests), `tests/test_grid_data_capture.py` (integration test).
 - `tests/data/MoS2_LDA/` — LDA test fixture for grid data capture.
+- **NAO radial basis capture (`export_basis_data`)** — new callback
+  (9th) exporting the full cubic-spline representation of all NAO radial
+  basis functions (u(r), (e−v)·u(r), du/dr) plus per-species logarithmic
+  grid parameters and outer radii, fired once inside `prepare_scf`
+  (before SCF). `BasisData` dataclass with spline evaluation —
+  `evaluate_u` / `evaluate_phi` / `evaluate_du_dr` /
+  `evaluate_kinetic` / `evaluate_deriv` (per-function species map
+  attached automatically at init; `evaluate_deriv` reads the
+  aims-native `spline_deriv`, non-zero only when `use_basis_gradients`
+  is active) — and incremental element-per-group `basis.h5` export for
+  building reusable basis libraries.
+  Registered before `aimspy_init` (`capture_basis_data=True`).
+- **Basis visualization (`aimspy.viz_basis`) + CLI** — `plot_radial_basis`
+  plots u(r) or φ(r) from a `basis.h5` file (runtime-free), with
+  per-l panels, optional log-x (evenly spreads the log-grid sampling),
+  and log-grid rug markers.  New CLI commands
+  `aimspy viz-basis` (all elements, `-j` parallel) and
+  `aimspy viz-grid` (scatter/contour/radial over `GridData` npz).
+- `tests/unit/test_basis_data.py` (17 tests),
+  `tests/unit/test_viz_basis.py` (27 tests),
+  `tests/test_basis_export.py` (integration test, 35 checks),
+  `tests/test_basis_callback_paths.py` (integration test: pre-init
+  registration / init-time error surfacing / user-precedence).
 
 ### Changed
 
@@ -30,9 +53,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly deallocates all 8 module-level buffers (coords, partition_tab,
   indices, vks, vks0, c_vdw_potential) in `aimspy_finalize`, preventing
   ~500 MB retention after Calculator close.
+- **Basis export guards** — `aimspy_export_basis_data_run` is now only
+  called when `aimspy_initialized` (plain aims runs no longer allocate the
+  ~MB export buffers), and early-returns when the `export_basis_data`
+  callback was never registered (new `export_basis_data_registered` flag,
+  same pattern as `modify_h0_registered`).
+- **viz defaults** — `scatter_slice` marker size `s` 2.0 → 5.0,
+  `slice_contour` `levels` 50 → 60 (denser atom-centred grids stay
+  readable).
+- **`register_callback('export_basis_data', ...)` timing** — a pre-init
+  registration is now applied *before* `aimspy_init` (previously deferred
+  until after init, at which point the callback had already fired and would
+  never be called).  A post-init registration now issues a
+  `UserWarning` for the same reason.
+- **Init-time callback errors** — exceptions raised inside callbacks that
+  fire during `aimspy_init` (`export_basis_data`) now surface as
+  `AimspyCallbackError` from `init()` itself, instead of being deferred
+  to the first `calc()` call.
 
 ### Fixed
 
+- **Process crash on second `aimspy_init` reusing the same logfile
+  (forrtl severe 104)** — `aimspy_init` opened the logfile (unit 20)
+  with `status='replace'` but nothing ever closed the unit; a second
+  `Calculator` in the same process pointing at the *same* logfile path
+  hit "incorrect STATUS= specifier value for connected file" and died
+  with a native crash.  `aimspy_init` now defensively closes the unit
+  before opening, and `aimspy_finalize` closes it after
+  `aims_finalize` (iostat-guarded, idempotent).
+  All existing multi-Calculator tests unknowingly avoided this by
+  using a distinct logfile per cycle.
+- **Process death at close() for init-only workflows (ELSI)** —
+  `final_deallocations` unconditionally called `elsi_finalize(eh_scf)`
+  even when no SCF ran (`eh_scf` never initialized), and ELSI's
+  `elsi_stop` ends with a bare Fortran `stop` — silently killing the
+  whole Python process (exit code 0) at `Calculator.close()`.
+  `aims_elsi_finalize_scf` is now guarded by an `elsi_scf_ready` flag
+  set in `aims_elsi_init_scf` and cleared after finalization.
+  This affected the `capture_basis_data` init-only pattern and any
+  init-failure cleanup path; `tests/test_basis_export.py` previously
+  lost its final "ALL CHECKS PASSED" line to this.
 - **vdW potential omission** — `vks` now includes vdW correction when
   vdW is active. Previously `vks = V_H + v_xc` only, missing the vdW
   contribution that `integrate_hamiltonian_matrix_p2` adds to the

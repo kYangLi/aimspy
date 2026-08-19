@@ -158,10 +158,10 @@ index 99810d70..960eaa1f 100644
              call localorb_info(info_str, use_unit,'(A)',OL_norm)
 diff --git a/src/aimspy_api/CMakeLists.txt b/src/aimspy_api/CMakeLists.txt
 new file mode 100644
-index 00000000..b1e497f4
+index 00000000..bc224a1a
 --- /dev/null
 +++ b/src/aimspy_api/CMakeLists.txt
-@@ -0,0 +1,16 @@
+@@ -0,0 +1,17 @@
 +# AimSpy API
 +# These files are added to aims1, same layer as ASI API files.
 +
@@ -171,6 +171,7 @@ index 00000000..b1e497f4
 +    ${CMAKE_CURRENT_LIST_DIR}/info.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/register.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/export_grid_data.f90
++    ${CMAKE_CURRENT_LIST_DIR}/export_basis_data.f90
 +)
 +
 +if(BUILD_SHARED_LIBS)
@@ -288,10 +289,10 @@ index 00000000..9fd1eb1e
 \ No newline at end of file
 diff --git a/src/aimspy_api/callback.f90 b/src/aimspy_api/callback.f90
 new file mode 100644
-index 00000000..79dfb807
+index 00000000..8b9d02f6
 --- /dev/null
 +++ b/src/aimspy_api/callback.f90
-@@ -0,0 +1,543 @@
+@@ -0,0 +1,651 @@
 +module aimspy_callback
 +
 +    use iso_c_binding
@@ -301,7 +302,9 @@ index 00000000..79dfb807
 +    public :: TAimspyCallback
 +    public :: TAimspyCsrMxDescr
 +    public :: TAimspyGridDescr
++    public :: TAimspyBasisDescr
 +    public :: grid_descr_storage
++    public :: basis_descr_storage
 +
 +
 +        type, bind(c) :: TAimspyCsrMxDescr
@@ -334,6 +337,25 @@ index 00000000..79dfb807
 +            type(c_ptr)  :: index_radial_ptr  = c_null_ptr  ! (n_full_points) int, 1-based
 +            type(c_ptr)  :: index_angular_ptr = c_null_ptr  ! (n_full_points) int, 1-based
 +        end type TAimspyGridDescr
++
++        ! Descriptor for the NAO radial basis set (species-level, static).
++        ! Field order MUST match the Python-side ctypes.Structure mirror
++        ! exactly (see pyapi/aimspy/_binding/ctypes_types.py BasisDescrC).
++        ! Spline coefficient arrays and grid parameters are passed as
++        ! separate callback arguments, NOT through this descriptor.
++        type, bind(c) :: TAimspyBasisDescr
++            integer(c_int) :: n_species        ! number of species
++            integer(c_int) :: n_basis_fns      ! total radial functions (all species)
++            integer(c_int) :: n_max_grid       ! max grid points across species
++            integer(c_int) :: n_max_spline     ! always 4 (cubic)
++            integer(c_int) :: total_grid_points ! sum of n_grid over species
++
++            type(c_ptr)  :: r_grid_min_ptr    = c_null_ptr  ! (n_species,) bohr
++            type(c_ptr)  :: r_grid_inc_ptr    = c_null_ptr  ! (n_species,)
++            type(c_ptr)  :: n_grid_ptr        = c_null_ptr  ! (n_species,) int
++            type(c_ptr)  :: r_grid_ptr        = c_null_ptr  ! (total_grid_points,) bohr
++            type(c_ptr)  :: outer_radius_ptr  = c_null_ptr  ! (n_basis_fns,) bohr
++        end type TAimspyBasisDescr
 +
 +        type :: TAimspyCallback
 +            
@@ -376,6 +398,11 @@ index 00000000..79dfb807
 +            type(c_funptr), private :: export_grid_data_callback = c_null_funptr
 +            type(c_ptr),    private :: export_grid_data_aux_ptr  = c_null_ptr
 +
++            ! export NAO radial basis data (spline coefficients, grid params, ...)
++            type(c_funptr), private :: export_basis_data_callback = c_null_funptr
++            type(c_ptr),    private :: export_basis_data_aux_ptr  = c_null_ptr
++            logical,        public  :: export_basis_data_registered = .false.
++
 +
 +          contains
 +            ! ============== [2]. register methods and calling functins ==================
@@ -402,6 +429,9 @@ index 00000000..79dfb807
 +
 +            procedure :: register_export_grid_data
 +            procedure :: export_grid_data_func
++
++            procedure :: register_export_basis_data
++            procedure :: export_basis_data_func
 +
 +            procedure :: reset_all
 +
@@ -493,10 +523,32 @@ index 00000000..79dfb807
 +            end subroutine aimspy_export_grid_cb_t
 +        end interface
 +
++        ! ---- export_basis_data: fires once after shrink_fixed_basis_phi_thresh ----
++        ! Spline coefficient arrays are passed as separate c_ptr arguments.
++        ! Shapes (all Fortran column-major flat buffers):
++        !   wave_spl / kinetic_spl / deriv_spl : (n_max_spline, n_max_grid, n_basis_fns)
++        ! Grid parameter arrays:
++        !   r_grid_min / r_grid_inc : (n_species,)
++        !   n_grid : (n_species,) int
++        !   r_grid : (total_grid_points,)
++        !   outer_radius : (n_basis_fns,)
++        abstract interface
++            subroutine aimspy_export_basis_cb_t(aux_ptr, descr_ptr, &
++                wave_spl_ptr, kinetic_spl_ptr, deriv_spl_ptr) bind(c)
++                use iso_c_binding
++                type(c_ptr), value :: aux_ptr
++                type(c_ptr), value :: descr_ptr  ! TAimspyBasisDescr
++                type(c_ptr), value :: wave_spl_ptr
++                type(c_ptr), value :: kinetic_spl_ptr
++                type(c_ptr), value :: deriv_spl_ptr
++            end subroutine aimspy_export_basis_cb_t
++        end interface
++
 +        ! =================== end [3]. ======================================
 +
 +        type(TAimspyCsrMxDescr), target :: descr_storage
 +        type(TAimspyGridDescr), target :: grid_descr_storage
++        type(TAimspyBasisDescr), target :: basis_descr_storage
 +
 +    contains
 +            
@@ -792,6 +844,59 @@ index 00000000..79dfb807
 +                                c_loc(rho0(1)))
 +            end subroutine export_grid_data_func
 +
++            subroutine register_export_basis_data(this, callback_funptr, aux_ptr)
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                type(c_funptr), value :: callback_funptr
++                type(c_ptr), value :: aux_ptr
++                this%export_basis_data_callback = callback_funptr
++                this%export_basis_data_aux_ptr  = aux_ptr
++                this%export_basis_data_registered = .true.
++            end subroutine register_export_basis_data
++
++            ! Fire the export_basis_data callback.  The descriptor is filled by
++            ! the caller (aimspy_export_basis_data module) before invoking this.
++            subroutine export_basis_data_func(this, r_grid_min, r_grid_inc, n_grid_arr, &
++                                              r_grid_arr, outer_radius_arr, &
++                                              wave_spl, kinetic_spl, deriv_spl)
++                use iso_c_binding
++                use dimensions, only: n_species, n_basis_fns, n_max_grid, n_max_spline
++                use grids, only: n_grid
++                implicit none
++                class(TAimspyCallback), intent(inout) :: this
++                real*8, intent(in), target, contiguous :: r_grid_min(:)
++                real*8, intent(in), target, contiguous :: r_grid_inc(:)
++                integer(c_int), intent(in), target, contiguous :: n_grid_arr(:)
++                real*8, intent(in), target, contiguous :: r_grid_arr(:)
++                real*8, intent(in), target, contiguous :: outer_radius_arr(:)
++                real*8, intent(in), target, contiguous :: wave_spl(:)
++                real*8, intent(in), target, contiguous :: kinetic_spl(:)
++                real*8, intent(in), target, contiguous :: deriv_spl(:)
++                procedure(aimspy_export_basis_cb_t), pointer :: callback_proc
++
++                if (.not. c_associated(this%export_basis_data_callback)) return
++
++                ! Fill descriptor
++                basis_descr_storage%n_species         = int(n_species, c_int)
++                basis_descr_storage%n_basis_fns       = int(n_basis_fns, c_int)
++                basis_descr_storage%n_max_grid        = int(n_max_grid, c_int)
++                basis_descr_storage%n_max_spline      = int(n_max_spline, c_int)
++                basis_descr_storage%total_grid_points = int(sum(n_grid(1:n_species)), c_int)
++
++                basis_descr_storage%r_grid_min_ptr   = c_loc(r_grid_min(1))
++                basis_descr_storage%r_grid_inc_ptr   = c_loc(r_grid_inc(1))
++                basis_descr_storage%n_grid_ptr       = c_loc(n_grid_arr(1))
++                basis_descr_storage%r_grid_ptr       = c_loc(r_grid_arr(1))
++                basis_descr_storage%outer_radius_ptr = c_loc(outer_radius_arr(1))
++
++                call c_f_procpointer(this%export_basis_data_callback, callback_proc)
++                call callback_proc(this%export_basis_data_aux_ptr, &
++                                c_loc(basis_descr_storage), &
++                                c_loc(wave_spl(1)), &
++                                c_loc(kinetic_spl(1)), &
++                                c_loc(deriv_spl(1)))
++            end subroutine export_basis_data_func
++
 +            ! Reset all registered callbacks, aux pointers, input pointers,
 +            ! and registered-flags.  Called from aimspy_finalize (and exposed
 +            ! via aimspy_reset_callbacks) so that a second Calculator in the
@@ -831,10 +936,182 @@ index 00000000..79dfb807
 +                this%export_grid_data_callback = c_null_funptr
 +                this%export_grid_data_aux_ptr  = c_null_ptr
 +
++                this%export_basis_data_callback = c_null_funptr
++                this%export_basis_data_aux_ptr  = c_null_ptr
++                this%export_basis_data_registered = .false.
++
 +            end subroutine reset_all
 +
 +
 +end module aimspy_callback
+diff --git a/src/aimspy_api/export_basis_data.f90 b/src/aimspy_api/export_basis_data.f90
+new file mode 100644
+index 00000000..dfd0cd70
+--- /dev/null
++++ b/src/aimspy_api/export_basis_data.f90
+@@ -0,0 +1,162 @@
++!****h* aimspy_api/export_basis_data
++!  PURPOSE
++!    Export the final (shrunken, orthonormalized, splined) NAO radial basis
++!    functions: logarithmic grid parameters, spline coefficients for
++!    u(r) / (e-v)*u(r) / du/dr, and identity metadata.
++!
++!    Fired once after shrink_fixed_basis_phi_thresh completes (pre-SCF),
++!    so the basis is fully determined and available before any SCF iteration.
++!
++!  DESIGN
++!    - Mirrors the proven module-level buffer pattern of
++!      export_grid_data.f90: buffers are filled once (basis is static),
++!      c_loc pointers handed to Python remain valid until finalize.
++!    - Spline coefficient arrays (basis_wave_spl etc.) are already alive
++!      in module basis; we copy them into flat 1-D buffers for ctypes
++!      interop (Python reshapes on its side).
++!    - Grid parameters (r_grid_min / r_grid_inc / n_grid) are per-species
++!      scalars from module grids; the full r_grid array is also stored
++!      for convenience (small, ~11 KB/species).
++!    - Identity metadata (basisfn_n / l / type / species) is already
++!      exported via aimspy_info; we do NOT duplicate it here.
++!
++!  UNITS
++!    - r_grid, outer_radius: bohr
++!    - spline coefficients: u(r) in bohr^(-1/2), (e-v)*u in Hartree*bohr^(-1/2)
++!      du/dr in bohr^(-3/2)
++!******
++module aimspy_export_basis_data
++  use iso_c_binding
++  implicit none
++  private
++
++  public :: aimspy_export_basis_data_run
++  public :: aimspy_export_basis_data_finalize
++
++  ! ===== module-level single-instance buffers (lifetime = process) =====
++  ! Filled once (basis is static after shrink_fixed_basis_phi_thresh).
++
++  ! Per-species grid parameters (3 scalars per species)
++  real(c_double), allocatable, target, save :: r_grid_min_buf(:)  ! (n_species,) bohr
++  real(c_double), allocatable, target, save :: r_grid_inc_buf(:)  ! (n_species,)
++  integer(c_int), allocatable, target, save :: n_grid_buf(:)      ! (n_species,)
++
++  ! Full logarithmic grids, concatenated across species
++  real(c_double), allocatable, target, save :: r_grid_buf(:)      ! (sum n_grid,) bohr
++
++  ! Per-radial-function data
++  real(c_double), allocatable, target, save :: outer_radius_buf(:) ! (n_basis_fns,) bohr
++
++  ! Spline coefficient buffers (flat, column-major order of the original
++  ! 3-D Fortran arrays; Python reshapes to (n_basis_fns, 4, n_grid)).
++  ! Original layout: basis_wave_spl(1:4, 1:n_max_grid, 1:n_basis_fns)
++  real(c_double), allocatable, target, save :: wave_spl_buf(:)     ! (4*n_max_grid*n_basis_fns,)
++  real(c_double), allocatable, target, save :: kinetic_spl_buf(:)  ! same
++  real(c_double), allocatable, target, save :: deriv_spl_buf(:)    ! same
++
++contains
++
++  ! ----------------------------------------------------------------------
++  ! Fill all buffers from module basis / grids and fire the callback.
++  ! Called once after shrink_fixed_basis_phi_thresh (prepare_scf.f90).
++  !
++  ! NOTE: This runs during aimspy_init (via aims_initialize → prepare_scf).
++  ! The Python side MUST have registered the export_basis_data callback
++  ! BEFORE calling aimspy_init, or the callback will be a no-op.
++  ! ----------------------------------------------------------------------
++  subroutine aimspy_export_basis_data_run()
++    use dimensions,       only: n_species, n_basis_fns, n_max_grid, n_max_spline
++    use basis,            only: basis_wave_spl, basis_kinetic_spl, basis_deriv_spl, &
++                                outer_radius
++    use grids,            only: r_grid, n_grid, r_grid_min, r_grid_inc
++    use aimspy_api_bank,  only: aimspy_callback_hd
++    implicit none
++
++    integer :: i_sp, offset, total_grid_points
++    logical :: have_deriv
++
++    ! ---- guard: basis must exist ----
++    if (.not. allocated(basis_wave_spl)) return
++    if (n_basis_fns <= 0) return
++
++    ! ---- early exit if the Python side never registered the callback:
++    !      avoid allocating/filling ~MBs of export buffers for nothing.
++    !      (The fire routine also no-ops on a null funptr; this check just
++    !      happens BEFORE the allocations, same registered-flag pattern as
++    !      modify_h0/modify_dHde.) ----
++    if (.not. aimspy_callback_hd%export_basis_data_registered) return
++
++    ! ---- (re)allocate per-species scalar buffers ----
++    if (allocated(r_grid_min_buf)) deallocate(r_grid_min_buf)
++    if (allocated(r_grid_inc_buf)) deallocate(r_grid_inc_buf)
++    if (allocated(n_grid_buf))     deallocate(n_grid_buf)
++
++    allocate(r_grid_min_buf(n_species))
++    allocate(r_grid_inc_buf(n_species))
++    allocate(n_grid_buf(n_species))
++
++    r_grid_min_buf = r_grid_min(1:n_species)
++    r_grid_inc_buf = r_grid_inc(1:n_species)
++    n_grid_buf     = int(n_grid(1:n_species), c_int)
++
++    ! ---- full grid array (concatenated across species) ----
++    total_grid_points = sum(n_grid(1:n_species))
++    if (allocated(r_grid_buf)) deallocate(r_grid_buf)
++    allocate(r_grid_buf(total_grid_points))
++    offset = 0
++    do i_sp = 1, n_species
++       r_grid_buf(offset+1 : offset+n_grid(i_sp)) = r_grid(1:n_grid(i_sp), i_sp)
++       offset = offset + n_grid(i_sp)
++    end do
++
++    ! ---- outer_radius ----
++    if (allocated(outer_radius_buf)) deallocate(outer_radius_buf)
++    allocate(outer_radius_buf(n_basis_fns))
++    outer_radius_buf = outer_radius(1:n_basis_fns)
++
++    ! ---- spline coefficient buffers (flat copy of 3-D Fortran arrays) ----
++    if (allocated(wave_spl_buf))    deallocate(wave_spl_buf)
++    if (allocated(kinetic_spl_buf)) deallocate(kinetic_spl_buf)
++    if (allocated(deriv_spl_buf))   deallocate(deriv_spl_buf)
++
++    allocate(wave_spl_buf(n_max_spline * n_max_grid * n_basis_fns))
++    allocate(kinetic_spl_buf(n_max_spline * n_max_grid * n_basis_fns))
++    allocate(deriv_spl_buf(n_max_spline * n_max_grid * n_basis_fns))
++
++    wave_spl_buf    = reshape(basis_wave_spl(:, :, 1:n_basis_fns), &
++                              [n_max_spline * n_max_grid * n_basis_fns])
++    kinetic_spl_buf = reshape(basis_kinetic_spl(:, :, 1:n_basis_fns), &
++                              [n_max_spline * n_max_grid * n_basis_fns])
++
++    have_deriv = allocated(basis_deriv_spl)
++    if (have_deriv) then
++       deriv_spl_buf = reshape(basis_deriv_spl(:, :, 1:n_basis_fns), &
++                               [n_max_spline * n_max_grid * n_basis_fns])
++    else
++       deriv_spl_buf = 0.0_c_double
++    end if
++
++    ! ---- fire the callback (no-op if not registered) ----
++    call aimspy_callback_hd%export_basis_data_func( &
++         r_grid_min_buf, r_grid_inc_buf, n_grid_buf, &
++         r_grid_buf, outer_radius_buf, &
++         wave_spl_buf, kinetic_spl_buf, deriv_spl_buf)
++
++  end subroutine aimspy_export_basis_data_run
++
++  ! ----------------------------------------------------------------------
++  ! Deallocate all module-level buffers.  Called from aimspy_finalize.
++  ! ----------------------------------------------------------------------
++  subroutine aimspy_export_basis_data_finalize()
++    implicit none
++    if (allocated(r_grid_min_buf))    deallocate(r_grid_min_buf)
++    if (allocated(r_grid_inc_buf))    deallocate(r_grid_inc_buf)
++    if (allocated(n_grid_buf))        deallocate(n_grid_buf)
++    if (allocated(r_grid_buf))        deallocate(r_grid_buf)
++    if (allocated(outer_radius_buf))  deallocate(outer_radius_buf)
++    if (allocated(wave_spl_buf))      deallocate(wave_spl_buf)
++    if (allocated(kinetic_spl_buf))   deallocate(kinetic_spl_buf)
++    if (allocated(deriv_spl_buf))     deallocate(deriv_spl_buf)
++  end subroutine aimspy_export_basis_data_finalize
++
++end module aimspy_export_basis_data
 diff --git a/src/aimspy_api/export_grid_data.f90 b/src/aimspy_api/export_grid_data.f90
 new file mode 100644
 index 00000000..53c3d69c
@@ -1402,10 +1679,10 @@ index 00000000..59c44dd4
 +end module aimspy_info
 diff --git a/src/aimspy_api/main.f90 b/src/aimspy_api/main.f90
 new file mode 100644
-index 00000000..0179e316
+index 00000000..6c9cd517
 --- /dev/null
 +++ b/src/aimspy_api/main.f90
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,107 @@
 +module aimspy_main
 +
 +    use iso_c_binding
@@ -1439,6 +1716,13 @@ index 00000000..0179e316
 +        call mpi_comm_rank(aimspy_mpi_comm, aimspy_mpi_rank, myerr)
 +
 +        if (aimspy_mpi_rank == 0) then
++            ! Defensive close: a previous aimspy_init in the same process
++            ! may have left this unit connected (it is never closed
++            ! elsewhere).  Re-opening an already-connected unit with
++            ! status='replace' is a runtime error (forrtl severe 104)
++            ! that kills the process — bit us on every second Calculator
++            ! reusing the same logfile path.
++            close(aimspy_filehandle, iostat=myerr)
 +            open(aimspy_filehandle, file=f_out_filename, status='replace')
 +        end if
 +
@@ -1468,13 +1752,23 @@ index 00000000..0179e316
 +    subroutine aimspy_finalize()  bind(c, name="aimspy_finalize")
 +        use aimspy_api_bank, only: aimspy_converged_scf, aimspy_callback_hd
 +        use aimspy_export_grid_data, only: aimspy_export_grid_data_finalize
++        use aimspy_export_basis_data, only: aimspy_export_basis_data_finalize
 +        implicit none
 +
++        integer :: myerr
++
 +        call aims_finalize(aimspy_converged_scf)
++
++        ! Release the logfile unit (rank 0 opened it in aimspy_init;
++        ! nothing else closes it).  iostat swallows the not-connected case.
++        close(aimspy_filehandle, iostat=myerr)
 +
 +        ! Deallocate grid-export buffers (coords / vks / vks0 / vdW) so the
 +        ! Fortran side does not hold ~500 MB of grid data after close.
 +        call aimspy_export_grid_data_finalize()
++
++        ! Deallocate basis-export buffers (spline coefficients / grid params).
++        call aimspy_export_basis_data_finalize()
 +
 +        ! Reset all callback funptrs / flags so a second Calculator in the
 +        ! same process never calls a dangling Python function pointer left
@@ -1499,10 +1793,10 @@ index 00000000..0179e316
 \ No newline at end of file
 diff --git a/src/aimspy_api/register.f90 b/src/aimspy_api/register.f90
 new file mode 100644
-index 00000000..9b00972e
+index 00000000..3facde26
 --- /dev/null
 +++ b/src/aimspy_api/register.f90
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,99 @@
 +module aimspy_callback_register
 +    use iso_c_binding
 +    use aimspy_api_bank, only : aimspy_callback_hd
@@ -1517,6 +1811,7 @@ index 00000000..9b00972e
 +    public :: aimspy_register_export_dHde_callback
 +    public :: aimspy_register_modify_dHde_callback
 +    public :: aimspy_register_export_grid_data_callback
++    public :: aimspy_register_export_basis_data_callback
 +    public :: aimspy_reset_callbacks
 +
 +    contains
@@ -1585,6 +1880,13 @@ index 00000000..9b00972e
 +        call aimspy_callback_hd%register_export_grid_data(callback_funptr, aux_ptr)
 +    end subroutine aimspy_register_export_grid_data_callback
 +
++    subroutine aimspy_register_export_basis_data_callback(callback_funptr, aux_ptr) &
++        bind(c, name="aimspy_register_export_basis_data_callback")
++        type(c_funptr), value :: callback_funptr
++        type(c_ptr), value :: aux_ptr
++        call aimspy_callback_hd%register_export_basis_data(callback_funptr, aux_ptr)
++    end subroutine aimspy_register_export_basis_data_callback
++
 +    ! Reset all registered callbacks (belt-and-suspenders in addition to the
 +    ! reset inside aimspy_finalize).  Python calls this from
 +    ! Calculator.close() / force_close() when available, so a second
@@ -1623,6 +1925,49 @@ index 40dc3eb6..292b9fd0 100644
              call aims_stop('CPSCF not converged')
          endif
  
+diff --git a/src/elsi_wrapper.f90 b/src/elsi_wrapper.f90
+index 0ea4d128..0f4eb0dc 100644
+--- a/src/elsi_wrapper.f90
++++ b/src/elsi_wrapper.f90
+@@ -82,6 +82,14 @@ module elsi_wrapper
+   type(elsi_rw_handle), public :: rwh_r ! For reading matrices
+   type(elsi_rw_handle), public :: rwh_w ! For writing matrices
+ 
++  ! aimspy: set .true. by aims_elsi_init_scf, cleared by
++  ! aims_elsi_finalize_scf.  Guards finalization of a handle that was
++  ! never initialized (init-only aimspy workflows: aimspy_init without
++  ! aimspy_run).  elsi_finalize on an uninitialized handle calls
++  ! elsi_stop, whose bare `stop` terminates the whole process (exit
++  ! code 0) — killing the Python interpreter at Calculator.close().
++  logical, private :: elsi_scf_ready = .false.
++
+   real(8), public :: pexsi_mu_min
+   real(8), public :: pexsi_mu_max
+ 
+@@ -298,6 +306,10 @@ subroutine aims_elsi_init_scf(elsi_comm,elsi_ctxt,blk,n_lrow,n_lcol,i_kpt)
+      call elsi_set_magma_solver(eh_scf,elsi_magma_solver)
+   end select
+ 
++  ! aimspy: handles are now live — allow finalization (see
++  ! aims_elsi_finalize_scf for why this flag exists).
++  elsi_scf_ready = .true.
++
+ end subroutine
+ !******
+ !****s* FHI-aims/aims_elsi_reinit_scf
+@@ -322,10 +334,11 @@ subroutine aims_elsi_finalize_scf()
+ 
+   implicit none
+ 
+-  if(.not. dry_run) then
++  if(.not. dry_run .and. elsi_scf_ready) then
+      call elsi_finalize(eh_scf)
+      call elsi_finalize_rw(rwh_r)
+      call elsi_finalize_rw(rwh_w)
++     elsi_scf_ready = .false.
+   end if
+ 
+ end subroutine
 diff --git a/src/initialize_scf.f90 b/src/initialize_scf.f90
 index 7a51c788..18637a26 100644
 --- a/src/initialize_scf.f90
@@ -1760,6 +2105,39 @@ index 24f73f67..b319ae14 100644
  
    integer, dimension(:,:), allocatable :: cell_index_pairs !SVL It is needed because the set of
                                                             ! active supercell can be different
+diff --git a/src/prepare_scf.f90 b/src/prepare_scf.f90
+index be0d7f23..a495d23c 100644
+--- a/src/prepare_scf.f90
++++ b/src/prepare_scf.f90
+@@ -34,6 +34,7 @@
+       use rel_x2c_mod
+       use libmbd_interface, only: libmbd_prepare, libmbd_update_geometry
+       use sqrttable, only: init_sqrttable
++      use aimspy_export_basis_data, only: aimspy_export_basis_data_run
+       use aims_fftw3_interface, only: aims_dfftw_plan_init
+       use vdw_correction
+       use basis, only: basis_atom, atom2basis_off
+@@ -237,6 +238,20 @@
+ !         call shrink_fixed_basis
+ !      end if
+ 
++      ! aimspy: export NAO radial basis data (spline coefficients, grid params).
++      ! The Python side must register the callback BEFORE aimspy_init, because
++      ! prepare_scf is called from aims_initialize inside aimspy_init.
++      ! Guard with aimspy_initialized (same pattern as export_grid_data in
++      ! scf_solver.f90): in a plain aims run the module-level export buffers
++      ! (~MBs) would be allocated and never freed (aimspy_finalize is not
++      ! reached in plain aims).
++      block
++        use aimspy_api_bank, only : aimspy_initialized
++        if (aimspy_initialized) then
++           call aimspy_export_basis_data_run()
++        end if
++      end block
++
+       ! OVV 250321 Placing definition of 'real' atom indices here for now
+       atoms_w_basis = 0
+       j = 1
 diff --git a/src/scf_solver.f90 b/src/scf_solver.f90
 index b6fadba9..8635dbca 100644
 --- a/src/scf_solver.f90

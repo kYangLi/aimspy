@@ -103,3 +103,26 @@ class GridDescrC(Structure):
         ("index_radial_ptr", c_void_p),
         ("index_angular_ptr", c_void_p),
     ]
+
+
+class BasisDescrC(Structure):
+    """ctypes mirror of Fortran `TAimspyBasisDescr` (callback.f90).
+
+    Field order MUST match the Fortran `type, bind(C) :: TAimspyBasisDescr`
+    declaration exactly.  Holds the per-species grid parameters and scalar
+    dimensions for the NAO radial basis; the three spline coefficient arrays
+    are passed as separate callback arguments.
+    """
+
+    _fields_ = [
+        ("n_species", c_int),
+        ("n_basis_fns", c_int),
+        ("n_max_grid", c_int),
+        ("n_max_spline", c_int),
+        ("total_grid_points", c_int),
+        ("r_grid_min_ptr", c_void_p),
+        ("r_grid_inc_ptr", c_void_p),
+        ("n_grid_ptr", c_void_p),
+        ("r_grid_ptr", c_void_p),
+        ("outer_radius_ptr", c_void_p),
+    ]

@@ -57,7 +57,7 @@ State transitions are guarded — calling `calc()` from `UNINIT`, or `close()` f
 
 ## Callback Framework
 
-The bundled FHI-aims patch inserts trigger points inside `src/initialize_scf.f90`, after `reshape_matrices` and before the initial diagonalisation. The available callbacks are:
+The bundled FHI-aims patch inserts trigger points across the FHI-aims driver files — mainly inside `src/initialize_scf.f90` (after `reshape_matrices`, before the initial diagonalisation), but also in `src/prepare_scf.f90` (pre-SCF basis export) and `src/scf_solver.f90` (post-SCF grid export). The available callbacks are:
 
 | Callback | Purpose |
 |----------|---------|
@@ -69,6 +69,7 @@ The bundled FHI-aims patch inserts trigger points inside `src/initialize_scf.f90
 | `export_dHde` | Export DFPT first-order Hamiltonian (post-CPSCF) |
 | `modify_dHde` | Inject modified first-order Hamiltonian (pre-CPSCF) |
 | `export_grid_data` | Export real-space grid data (post-SCF convergence) |
+| `export_basis_data` | Export NAO radial basis splines (inside `prepare_scf`, during `aimspy_init` — must be registered **before** `aimspy_init`) |
 
 When `modify_h0` is registered, the patch **short-circuits** the standard initial diagonalisation: it calls `advance_KS_solution` directly on the injected Hamiltonian and sets `restart_zero_iteration=.true.`, which is what enables warmstart in several iterations.
 
@@ -88,6 +89,7 @@ When `modify_h0` is registered, the patch **short-circuits** the standard initia
 | `capture_overlap=True` | `export_ovlp` | `calc.overlap` returns live overlap on all ranks |
 | `capture_initial_hamiltonian=True` | `export_h0` | `calc.initial_hamiltonian` populated |
 | `modify_init_ham(...)` called | `python_func` + `modify_h0` | warmstart / scaling / custom modification |
+| `capture_basis_data=True` | `export_basis_data` | `calc.basis_data` populated (registered pre-`aimspy_init` because it fires during init) |
 
 Users can also register custom callbacks via `Calculator.register_callback(name, fn, aux, extra_ptr)` for advanced use cases.
 
@@ -274,6 +276,7 @@ The bundled patch (`aimspy/_patches/aimspy-patch_v0.1.0.diff`, ~1100 lines) does
    - `info.f90` — `TAimspyInfo` bind(C) struct + `aimspy_get_info` populating a `save` buffer.
    - `register.f90` — the `aimspy_register_*_callback` bind(C) subroutines.
    - `main.f90` — `aimspy_init` / `aimspy_run` / `aimspy_finalize` / `aimspy_all` lifecycle entry points.
+   - `export_grid_data.f90` / `export_basis_data.f90` — module-level buffer assemblies + triggers for the post-SCF grid export and the pre-SCF NAO basis export (both finalized in `aimspy_finalize` to release their buffers).
 
 2. **Hooks into `src/initialize_scf.f90`** — trigger points after `reshape_matrices`, and the warmstart short-circuit calling `advance_KS_solution` on the injected Hamiltonian with `restart_zero_iteration=.true.`.
 
@@ -333,6 +336,34 @@ gd2 = GridData.load_npz("grid.npz")  # load
 ```
 
 The npz format is self-describing: it stores `n_full_points`, `n_spin`, `n_atoms`, all grid arrays, and optionally `atom_coords`/`atom_symbols`/`lattice`.
+
+## NAO Radial Basis (BasisData)
+
+With `capture_basis_data=True`, the `export_basis_data` callback (registered **before** `aimspy_init`, because it fires inside `prepare_scf` during init) captures the complete cubic-spline representation of the NAO radial basis: spline coefficients for u(r), (e−v)·u(r), and du/dr, plus per-species logarithmic grid parameters (`r_grid_min`, `r_grid_inc`, `n_grid`) and per-function `outer_radius`.
+
+- Evaluation: `basis_data.evaluate_u(i_fn, r)` / `evaluate_phi` / `evaluate_du_dr` — the per-function 0-based species map is attached automatically at init (`basis_data.species_of_fn`); u(r) evaluates to zero outside `[r_grid_min, outer_radius]`.
+- Identity metadata (`n`, `l`, `type`, `species` per radial function) comes from `calc.info` (`basisfn_n` / `basisfn_l` / `basisfn_type` / `basisfn_species`).
+- Units: lengths in bohr, energies in Hartree; u(r) normalized so ∫u²dr = 1 (bohr^−1/2).
+
+### basis.h5 format
+
+`BasisData.save_h5(path, info)` builds an **incremental element-per-group library**: the file is created if missing; existing element groups are skipped silently (not overwritten), so one file can accumulate basis sets across calculations.
+
+```
+/attrs: format_version, generator, date, units, species_list, n_species
+/<El>/attrs: element, z, r_grid_min, r_grid_inc, n_grid,
+             n_basis_rad, n_orbitals, l_max
+/<El>/r_grid        (n_grid,)                bohr, shared log grid
+/<El>/n, l, zeta    (n_basis_rad,) int32     quantum numbers; zeta = index
+                                             among same (n,l) duplicates
+/<El>/type          (n_basis_rad,) S8        atomic/hydro/...
+/<El>/outer_radius  (n_basis_rad,)           bohr, per-function cutoff
+/<El>/spline_wave   (n_basis_rad, 4, n_grid) cubic coeffs for u(r)
+/<El>/spline_kinetic (same)                  for (e−v)·u(r)
+/<El>/spline_deriv  (same)                   for du/dr
+```
+
+Visualize offline with `aimspy viz-basis basis.h5` or `aimspy.viz_basis.plot_radial_basis`.
 
 ## Data Flow in AimsPy
 

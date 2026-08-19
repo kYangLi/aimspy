@@ -101,6 +101,43 @@ DeepH on-disk format reader, writer, and converter — reads
    :members:
    :show-inheritance:
 
+Grid Data
+---------
+
+Real-space integration-grid capture (``export_grid_data`` callback):
+density, Kohn-Sham/Hartree potentials, grid geometry, derived fields,
+npz I/O, and MPI gather.
+
+.. automodule:: aimspy.grid_data
+   :members:
+   :show-inheritance:
+
+Basis Data
+----------
+
+NAO radial basis capture (``export_basis_data`` callback): cubic-spline
+representation of all radial basis functions with per-species
+logarithmic grids, spline evaluation, and incremental ``basis.h5``
+export.
+
+.. automodule:: aimspy.basis_data
+   :members:
+   :show-inheritance:
+
+Visualization
+-------------
+
+Plotting helpers for grid data (slices, radial profiles, isosurfaces)
+and NAO radial basis functions from ``basis.h5``.
+
+.. automodule:: aimspy.viz
+   :members:
+   :show-inheritance:
+
+.. automodule:: aimspy.viz_basis
+   :members:
+   :show-inheritance:
+
 Exceptions
 ----------
 

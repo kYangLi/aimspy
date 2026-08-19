@@ -18,6 +18,7 @@ from .callback_types import (
     ExportDHdeCb,
     ModifyDHdeCb,
     ExportGridDataCb,
+    ExportBasisDataCb,
 )
 
 _log = logging.getLogger(__name__)
@@ -56,6 +57,11 @@ _PROTOTYPES: dict[str, tuple[list, object]] = {
     ),
     # ---- real-space grid data export ----
     "aimspy_register_export_grid_data_callback": ([ExportGridDataCb, c_void_p], None),
+    # ---- NAO radial basis data export ----
+    "aimspy_register_export_basis_data_callback": (
+        [ExportBasisDataCb, c_void_p],
+        None,
+    ),
 }
 
 

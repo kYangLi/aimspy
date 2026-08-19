@@ -1,8 +1,9 @@
 # Command-line Interface
 
-The `aimspy` command-line tool provides a single subcommand, `patch`,
-for managing the bundled FHI-aims patch. It can also be invoked as
-`python -m aimspy patch` (equivalent).
+The `aimspy` command-line tool provides the subcommands `patch`
+(manage the bundled FHI-aims patch), `viz-basis` and `viz-grid`
+(offline visualization). It can also be invoked as
+`python -m aimspy <subcommand>` (equivalent).
 
 Full patching instructions (including prerequisites and build steps) live
 in [Installation & Setup](./installation_and_setup.md#patching-fhi-aims).
@@ -49,3 +50,81 @@ the CLI will refuse to uninstall and point you to the recovery command.
 
 For common patch-related issues (failed dry-run, version mismatch, etc.),
 see [Troubleshooting](./troubleshooting.md).
+
+---
+
+# aimspy viz-basis
+
+Plot NAO radial basis functions from a `basis.h5` file (written by
+`BasisData.save_h5`). One figure is produced per element in the file;
+runtime-free (no libaims / MPI needed).
+
+## Usage
+
+```bash
+aimspy viz-basis BASIS_H5 [OPTIONS]
+```
+
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `--kind [u|phi]` | Plot u(r) (default) or φ(r) = u(r)/r |
+| `-j, --jobs INT` | Parallel worker processes (default 1; only with `-o`) |
+| `--n-plot INT` | Interpolated points per curve (default 500) |
+| `--split-l` | One panel per angular momentum l |
+| `--logx` | Log-scale the x axis (spreads the log-grid sampling evenly) |
+| `--no-grid` | Hide the log-grid rug markers |
+| `--no-type` | Omit the function type from curve labels |
+| `--bohr` | X axis in bohr instead of Angstrom |
+| `--r-max FLOAT` | X-axis upper limit (plot units) |
+| `-o, --output-dir PATH` | Save one figure per element here as `ELEMENT_basis.FMT` (default: show interactively) |
+| `--fmt [png|pdf|svg]` | Figure format with `-o` (default png) |
+
+## Example
+
+```bash
+aimspy viz-basis basis.h5 -o figs/ -j 4          # all elements, 4 workers
+aimspy viz-basis basis.h5 --kind phi --split-l   # interactive, per-l panels
+aimspy viz-basis basis.h5 --logx                 # log x axis: even log-grid spread
+```
+
+---
+
+# aimspy viz-grid
+
+Plot real-space grid data from an npz file (`GridData.save_npz`).
+
+## Usage
+
+```bash
+aimspy viz-grid NPZ_PATH [FIELD] [OPTIONS]
+```
+
+`FIELD` defaults to `rho` (also: `delta_rho`, `vks`, `vks0`, `vxc`, ...).
+
+## Options
+
+| Flag | Description |
+|------|-------------|
+| `--mode [scatter|contour|radial]` | Plot mode (default scatter) |
+| `--axis INT` | Slice-plane normal 0/1/2 (default 2) |
+| `--center FLOAT` | Slice position along the axis (default 0) |
+| `--width FLOAT` | Half-thickness of the accepted slab (default 1.0) |
+| `--nx, --ny INT` | Contour mesh resolution (default 200) |
+| `-l, --log` | Colour by log10(value) — positive fields |
+| `--symlog` | Diverging sym-log scale — difference fields |
+| `--linthresh FLOAT` | Linear half-width for `--symlog` (default 1e-3) |
+| `--point-size FLOAT` | Scatter marker size (default 5.0) |
+| `--levels INT` | Contour levels (default 60) |
+| `--atom-index INT` | Radial mode: 0-based atom index (required) |
+| `--bohr` | Use bohr instead of Angstrom |
+| `--lin-y` | Radial mode: linear y axis |
+| `-o, --output PATH` | Save the figure here (format from suffix) instead of showing it |
+
+## Example
+
+```bash
+aimspy viz-grid grid.npz delta_rho --symlog --linthresh 1e-3 -o drho.png
+aimspy viz-grid grid.npz rho --mode radial --atom-index 0
+```

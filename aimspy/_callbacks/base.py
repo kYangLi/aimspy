@@ -322,6 +322,33 @@ class CallbackManager:
                 except Exception as exc:
                     _record_callback_error(errors, spec.name, exc)
 
+        elif spec.name == "export_basis_data":
+
+            def wrapper(
+                aux_ptr: int,
+                descr_ptr: int,
+                wave_spl_ptr,
+                kinetic_spl_ptr,
+                deriv_spl_ptr,
+            ) -> None:
+                _aux = _unpack_aux(aux_ptr, aux) if aux is not None else {}
+                try:
+                    from ..basis_data import BasisData
+
+                    # BasisData._from_c copies every array out of the Fortran
+                    # buffers (which are freed by aimspy_finalize after the
+                    # Calculator is closed).
+                    bd = BasisData._from_c(
+                        descr_ptr,
+                        wave_spl_ptr,
+                        kinetic_spl_ptr,
+                        deriv_spl_ptr,
+                    )
+                    _aux["basis_data"] = bd
+                    fn(_aux, bd)
+                except Exception as exc:
+                    _record_callback_error(errors, spec.name, exc)
+
         else:
             # Generic fallback: pass unpacked aux only
             def wrapper(aux_ptr: int, *rest) -> None:

@@ -155,6 +155,13 @@ class CalculatorConfig:
         ``vh0`` / ``rho0``) is available after ``calc()``.  Fires once after
         SCF convergence.  Scalar V_KS only — exact for LDA; for GGA the
         non-local vector term is not exported.  Default False.
+    capture_basis_data : bool
+        If True, register the ``export_basis_data`` callback so that
+        :attr:`Calculator.basis_data` (NAO radial basis spline coefficients
+        and grid parameters) is available after ``calc.init()`` — the
+        callback fires inside ``aimspy_init`` itself
+        (``prepare_scf``, after ``shrink_fixed_basis_phi_thresh``);
+        no ``calc()`` call is needed.  Default False.
     """
 
     lib_path: Path | str
@@ -167,6 +174,7 @@ class CalculatorConfig:
     capture_overlap: bool = False
     capture_first_order_hamiltonian: bool = False
     capture_grid_data: bool = False
+    capture_basis_data: bool = False
 
     def __post_init__(self):
         self.lib_path = Path(self.lib_path)
@@ -370,6 +378,43 @@ class Calculator:
                 self._binding = BindingLib(cdll)
                 self._cb_mgr = CallbackManager(self._binding)
 
+                # ---- pre-init: wire callbacks that fire during aimspy_init ----
+                # export_basis_data fires inside prepare_scf (called from
+                # aims_initialize inside aimspy_init), so it MUST be
+                # registered before aimspy_init.  A minimal aux dict is
+                # used here; it is merged into the full _runtime_aux after
+                # aimspy_init completes.
+                pre_aux: dict = {"basis_data": None, "rank": rank}
+                if self._cfg.capture_basis_data:
+
+                    def _on_export_basis_data(ax, bd):
+                        ax["basis_data"] = bd
+
+                    self._cb_mgr.register(
+                        SPECS_BY_NAME["export_basis_data"],
+                        _on_export_basis_data,
+                        pre_aux,
+                    )
+
+                # export_basis_data fires DURING aimspy_init (inside
+                # prepare_scf), so any user registration for it must be
+                # applied BEFORE aimspy_init — unlike all other callbacks,
+                # whose triggers come later (during run/SCF).  Split the
+                # pending list accordingly; the remainder is applied after
+                # aimspy_init as before.  A user registration here REPLACES
+                # the built-in capture above (CallbackManager.register
+                # overwrites by name), consistent with the "user takes
+                # precedence" rule — in that case calc.basis_data stays None
+                # unless the user's own handler stores it.
+                deferred_later = []
+                for name, fn, aux, extra_ptr in self._pending_callbacks:
+                    spec = get_spec(name)
+                    if name == "export_basis_data":
+                        self._cb_mgr.register(spec, fn, aux, extra_ptr)
+                    else:
+                        deferred_later.append((name, fn, aux, extra_ptr))
+                self._pending_callbacks = deferred_later
+
                 self._log_info("aimspy_init")
                 self._binding.aimspy_init(
                     _py2f(comm),
@@ -388,6 +433,20 @@ class Calculator:
 
                 # Wire default callbacks based on config + modify.
                 self._wire_callbacks()
+
+                # Merge pre-init aux into the full _runtime_aux.
+                # If the basis callback already fired during aimspy_init,
+                # its data is in pre_aux; transfer it now (and attach the
+                # per-function species map for BasisData.evaluate_*).
+                if pre_aux.get("basis_data") is not None:
+                    bd = pre_aux["basis_data"]
+                    bd.species_of_fn = self._info.basisfn_species
+                    self._runtime_aux["basis_data"] = bd
+
+                # Surface errors from callbacks that fired during
+                # aimspy_init (currently only export_basis_data can);
+                # otherwise they would only surface at calc().
+                self._check_callback_errors("init()")
 
             self._state = CalcState.INITED
             self._log_info("init done. n_basis=%d", self._info.n_basis)
@@ -720,6 +779,23 @@ class Calculator:
             return None
         return self._runtime_aux.get("grid_data")
 
+    @property
+    def basis_data(self):
+        """NAO radial basis data as :class:`BasisData`.
+
+        Returns ``None`` unless
+        ``CalculatorConfig.capture_basis_data=True`` was set and the
+        basis generation has completed (the callback fires once after
+        ``shrink_fixed_basis_phi_thresh``, before SCF begins).
+
+        Contains spline coefficients for u(r), (e−v)·u(r), and du/dr,
+        plus per-species logarithmic grid parameters.  Identity metadata
+        (``n``, ``l``, ``type``, ``species``) is in :attr:`info`.
+        """
+        if self._runtime_aux is None:
+            return None
+        return self._runtime_aux.get("basis_data")
+
     # ==================================================================
     # H0 modification (unified API: direct + deferred)
     # ==================================================================
@@ -981,9 +1057,16 @@ class Calculator:
 
         - **Pre-init** (state UNINIT): the registration is deferred and
           applied inside :meth:`init` after the callback manager is
-          created, before :meth:`_wire_callbacks`.
+          created, before :meth:`_wire_callbacks`.  **Exception**:
+          ``export_basis_data`` fires *during* ``aimspy_init`` (inside
+          ``prepare_scf``), so its pre-init registration is applied
+          *before* ``aimspy_init`` instead.
         - **Post-init, pre-calc** (state INITED): the registration is
-          applied immediately to the live callback manager.
+          applied immediately to the live callback manager.  **Exception**:
+          ``export_basis_data`` has already fired by then — a warning is
+          issued and the callback will never be called; use
+          ``CalculatorConfig.capture_basis_data=True`` or pre-init
+          registration instead.
 
         Calling from DONE state is allowed (registers on the live manager)
         but the callback will never fire (SCF already completed).
@@ -1030,6 +1113,18 @@ class Calculator:
                 UserWarning,
                 stacklevel=2,
             )
+        if self._state == CalcState.INITED and name == "export_basis_data":
+            import warnings
+
+            warnings.warn(
+                "register_callback for 'export_basis_data' after init: the "
+                "callback fires inside aimspy_init and has already fired, so "
+                "it will never be called. Use "
+                "CalculatorConfig.capture_basis_data=True or register before "
+                "init() instead.",
+                UserWarning,
+                stacklevel=2,
+            )
         spec = get_spec(name)
         self._cb_mgr.register(spec, fn, aux, extra_ptr)
 
@@ -1070,20 +1165,20 @@ class Calculator:
                 raise AimspyConfigError(f"{label} file not found: {src}")
             shutil.copy2(src, dst)
 
-    def _check_callback_errors(self):
+    def _check_callback_errors(self, phase: str = "calc()") -> None:
         if self._cb_mgr is None:
             return
         errs = getattr(self._cb_mgr, "_errors", None)
         if not errs:
             return
-        self._log_warning("%d callback error(s) detected in calc()", len(errs))
+        self._log_warning("%d callback error(s) detected in %s", len(errs), phase)
         captured = list(errs)
         # Don't clear — preserve for user inspection via _cb_mgr._errors
         for name, exc, tb_str in captured:
             # ERROR on all ranks for debugging
             self._log.error("rank %d: [%s] %s\n%s", self._rank, name, exc, tb_str)
         exc = AimspyCallbackError(
-            f"{len(captured)} callback error(s) during calc(): "
+            f"{len(captured)} callback error(s) during {phase}: "
             + ", ".join(n for n, _, _ in captured)
         )
         exc.callback_errors = captured
@@ -1107,6 +1202,7 @@ class Calculator:
             "external_aimspy",
             "external_first_order_aimspy",
             "grid_data",
+            "basis_data",
         ):
             self._runtime_aux[key] = None
 
@@ -1231,6 +1327,7 @@ class Calculator:
             "first_order_hamiltonian": None,
             "external_first_order_aimspy": None,
             "grid_data": None,  # this rank's real-space grid subset (capture_grid_data)
+            "basis_data": None,  # NAO radial basis spline data (capture_basis_data)
             "rank": self._rank,
         }
 
@@ -1516,6 +1613,10 @@ class Calculator:
                 _on_export_grid_data,
                 aux,
             )
+
+        # 9. export_basis_data — registered in pre-init (before aimspy_init)
+        # because it fires inside prepare_scf during aimspy_init itself.
+        # No re-registration needed here; is_registered() returns True.
 
 
 # =============================================================================

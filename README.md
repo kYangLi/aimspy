@@ -246,6 +246,28 @@ with Calculator(config) as calc:
         print(f"delta_rho range: {gd.delta_rho.min():.3e} .. {gd.delta_rho.max():.3e}")
 ```
 
+**NAO radial basis capture**
+export the full cubic-spline representation of the radial basis functions
+(u(r), kinetic, du/dr + log-grid parameters), then build an incremental
+`basis.h5` library and plot it offline:
+
+```python
+config = CalculatorConfig(
+    lib_path="/path/to/libaims.so",
+    capture_basis_data=True,  # export NAO radial basis splines
+)
+with Calculator(config) as calc:
+    calc.do(comm=comm, work_dir="./MoS2")
+    if rank == 0:
+        bd = calc.basis_data
+        u = bd.evaluate_u(0, [0.5, 1.0, 2.0])  # u(r) at r in bohr
+        bd.save_h5("basis.h5", calc.info)      # element-per-group library
+```
+
+```bash
+aimspy viz-basis basis.h5 -o figures/   # offline plotting, no libaims needed
+```
+
 For more information on deferred source, overlap capture, error recovery, and the full API, see [Basic Usage](https://docs.deeph-pack.com/aimspy/en/latest/basic_usage.html) and [API Reference](https://docs.deeph-pack.com/aimspy/en/latest/api_reference.html).
 
 ## Citation

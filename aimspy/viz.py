@@ -147,7 +147,7 @@ def scatter_slice(
     linthresh: float = 1e-3,
     cmap: Optional[str] = None,
     angstrom: bool = True,
-    s: float = 2.0,
+    s: float = 5.0,
     ax=None,
     colorbar: bool = True,
 ):
@@ -183,7 +183,8 @@ def scatter_slice(
     angstrom : bool
         Interpret *center*/*width* and plot axes in Angstrom (default) / bohr.
     s : float
-        Marker size.
+        Marker size (default 5.0 — large enough to stay visible on the
+        dense atom-centred grid).
     ax, colorbar : matplotlib target / toggle
 
     Returns
@@ -238,7 +239,7 @@ def slice_contour(
     symlog: bool = False,
     linthresh: float = 1e-3,
     angstrom: bool = True,
-    levels: Union[int, Sequence[float]] = 50,
+    levels: Union[int, Sequence[float]] = 60,
     cmap: Optional[str] = None,
     method: str = "linear",
     ax=None,

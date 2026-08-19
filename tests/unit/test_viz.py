@@ -3,6 +3,9 @@
 pyvista-dependent ``isosurface`` is tested only for its ImportError guard
 (pyvista is not installed in the test environment).  matplotlib figures are
 built with the non-interactive Agg backend.
+
+The mock-grid builder lives in ``tests/unit/conftest.py`` (``make_grid`` /
+``make_grid_factory``), shared with the CLI visualization tests.
 """
 
 from __future__ import annotations
@@ -14,34 +17,9 @@ matplotlib.use("Agg")  # headless
 import numpy as np
 import pytest
 
-from aimspy.grid_data import GridData
 from aimspy import viz
 
-
-def _make_grid(n=60, n_atoms=2, seed=1):
-    rng = np.random.default_rng(seed)
-    coords = (rng.random((3, n)) - 0.5) * 8.0  # bohr, centred
-    rho = (rng.random((1, n)) + 0.05) * 10.0
-    vh = -(rng.random(n) + 0.5)
-    vh0 = -(rng.random(n) + 0.5)
-    vxc = -np.abs(rng.random((1, n))) - 0.01
-    vxc0 = -np.abs(rng.random((1, n))) - 0.01
-    return GridData(
-        n_full_points=n,
-        n_spin=1,
-        n_atoms=n_atoms,
-        coords=coords,
-        partition_tab=np.full(n, 0.1),
-        index_atom=np.arange(n, dtype=np.int32) % n_atoms,
-        index_radial=np.arange(n, dtype=np.int32),
-        index_angular=np.arange(n, dtype=np.int32),
-        rho=rho,
-        vks=vh[np.newaxis, :] + vxc,
-        vks0=vh0[np.newaxis, :] + vxc0,
-        vh=vh,
-        vh0=vh0,
-        rho0=(rng.random(n) + 0.05) * 4.0 * np.pi,
-    )
+from .conftest import make_grid as _make_grid
 
 
 class TestResolveValues:

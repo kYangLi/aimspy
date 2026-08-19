@@ -206,6 +206,38 @@ viz.radial_profile(gd, value="rho", atom_index=0)  # radial profile
 symlog colour scale reveals weak charge-transfer features (0.001–0.01
 e/bohr³) that a linear scale would flatten.*
 
+### NAO radial basis capture
+
+Capture the complete cubic-spline representation of the NAO radial basis
+functions (u(r), (e−v)·u(r), du/dr, plus per-species log-grid parameters).
+The callback fires once inside `prepare_scf` — before any SCF iteration —
+so the data is available right after `calc.init()` (no `calc()` needed):
+
+```python
+config = CalculatorConfig(
+    lib_path="/path/to/libaims.so",
+    capture_basis_data=True,  # export_basis_data callback (registered pre-init)
+)
+with Calculator(config) as calc:
+    calc.do(comm=comm, work_dir="./MoS2")
+    if rank == 0:
+        bd = calc.basis_data            # BasisData object
+
+        # Evaluate radial functions at arbitrary distances (bohr)
+        u = bd.evaluate_u(0, [0.5, 1.0, 2.0])   # species map attached automatically
+
+        # Incremental H5 library (existing elements are skipped, not
+        # overwritten), then plot offline:
+        bd.save_h5("basis.h5", calc.info)
+```
+
+```bash
+aimspy viz-basis basis.h5 -o figures/   # one radial-basis figure per element
+```
+
+See [Key Concepts](./key_concepts.md#nao-radial-basis-basisdata) for the
+`basis.h5` layout, evaluation semantics, and units.
+
 ### Error recovery
 
 If SCF crashes, use `force_close()` (always safe) and create a fresh `Calculator`.
@@ -244,7 +276,7 @@ except Exception:
 
 ## 2. Command-line Tool
 
-The `aimspy patch` CLI manages the bundled FHI-aims patch (apply, uninstall, dry-run, list). See the [CLI reference](./cli.md) for full options and examples.
+The `aimspy` CLI provides `patch` (manage the bundled FHI-aims patch: apply, uninstall, dry-run, list) and the visualization front-ends `viz-basis` / `viz-grid` (offline plotting from `basis.h5` / grid npz files). See the [CLI reference](./cli.md) for full options and examples.
 
 ## 3. Learning Through Examples
 

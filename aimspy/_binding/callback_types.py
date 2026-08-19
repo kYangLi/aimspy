@@ -82,6 +82,26 @@ V_KS only (LDA-exact; GGA vector term not exported).
 """
 
 # ---------------------------------------------------------------------------
+# Callback type: export NAO radial basis data (spline coefficients, grid)
+# ---------------------------------------------------------------------------
+ExportBasisDataCb = CFUNCTYPE(
+    None,
+    c_void_p,  # aux
+    c_void_p,  # descr_ptr (TAimspyBasisDescr)
+    POINTER(c_double),  # wave_spl    (n_max_spline, n_max_grid, n_basis_fns)
+    POINTER(c_double),  # kinetic_spl (same layout)
+    POINTER(c_double),  # deriv_spl   (same layout)
+)
+"""void(*)(void *aux, void *descr, double *wave_spl, double *kinetic_spl,
+           double *deriv_spl)
+
+Fires once after shrink_fixed_basis_phi_thresh (pre-SCF).  ``descr`` points
+to a ``TAimspyBasisDescr`` holding per-species grid parameters and scalar
+dimensions; the three spline coefficient arrays are flat Fortran column-major
+buffers of shape (n_max_spline, n_max_grid, n_basis_fns).
+"""
+
+# ---------------------------------------------------------------------------
 # Callback type: generic Python hook (no extra args beyond aux)
 # ---------------------------------------------------------------------------
 ReconstructMxCb = CFUNCTYPE(None, c_void_p)
