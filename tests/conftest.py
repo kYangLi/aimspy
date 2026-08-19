@@ -21,4 +21,6 @@ collect_ignore = [
     "test_grid_data_capture.py",
     "test_callback_reset.py",
     "test_memory_loop.py",
+    "test_basis_export.py",
+    "test_basis_callback_paths.py",
 ]

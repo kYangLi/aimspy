@@ -2,6 +2,7 @@
         test-regression test-export-deeph test-strategies test-integration \
         test-all test-memory-loop test-dHde-capture test-dHde-inject-direct \
         test-dHde-inject-defer test-dHde run-from-scratch run-continue-calc run-example \
+        test-grid-data-capture test-basis-export test-basis-callback-paths \
         build lint help patch
 
 VENV := .venv
@@ -23,6 +24,11 @@ help:
 	@echo "  test-dHde-inject-direct  Run DFPT dH/de direct warmstart (needs deeph_dHde_out/)"
 	@echo "  test-dHde-inject-defer   Run DFPT dH/de deferred warmstart (needs deeph_dHde_out/)"
 	@echo "  test-dHde             Run all 3 dHde tests in order"
+	@echo "  test-dHde-serial-capture  Run DFPT serial dH/de capture (produces deeph_dHde_serial_out/)"
+	@echo "  test-dHde-serial-inject   Run DFPT serial dH/de warmstart (needs deeph_dHde_serial_out/)"
+	@echo "  test-grid-data-capture Run real-space grid capture test (MoS2_LDA)"
+	@echo "  test-basis-export     Run NAO basis export test (MoS2_LDA)"
+	@echo "  test-basis-callback-paths  Run basis callback registration-semantics test (MoS2_LDA)"
 	@echo "  test-integration     Run all integration tests in dependency order"
 	@echo "  test-memory-loop     Run 15-cycle memory pressure test (capture_overlap=True)"
 	@echo "  test-all             Run unit + integration tests"
@@ -99,9 +105,19 @@ test-dHde-serial: test-dHde-serial-capture test-dHde-serial-inject
 test-callback-reset:
 	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_callback_reset.py
 
+test-grid-data-capture:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_grid_data_capture.py
+
+test-basis-export:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_basis_export.py
+
+test-basis-callback-paths:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_basis_callback_paths.py
+
 test-integration: test-baseline test-export-deeph test-warmstart \
                   test-capture-overlap test-regression test-strategies test-dHde \
-                  test-dHde-serial test-callback-reset
+                  test-dHde-serial test-callback-reset test-grid-data-capture \
+                  test-basis-export test-basis-callback-paths
 
 test-all: test test-integration
 

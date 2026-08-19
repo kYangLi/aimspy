@@ -57,7 +57,7 @@ State transitions are guarded — calling `calc()` from `UNINIT`, or `close()` f
 
 ## Callback Framework
 
-The bundled FHI-aims patch inserts trigger points across the FHI-aims driver files — mainly inside `src/initialize_scf.f90` (after `reshape_matrices`, before the initial diagonalisation), but also in `src/prepare_scf.f90` (pre-SCF basis export) and `src/scf_solver.f90` (post-SCF grid export). The available callbacks are:
+The bundled FHI-aims patch inserts trigger points across the FHI-aims driver files — mainly inside `src/initialize_scf.f90` (after `reshape_matrices`, before the initial diagonalisation), but also in `src/prepare_scf.f90` (pre-SCF basis export), `src/scf_solver.f90` (post-SCF grid export), and `src/DFPT_main/DFPT_module.f90` (pre/post-CPSCF first-order Hamiltonian export and injection). The available callbacks are:
 
 | Callback | Purpose |
 |----------|---------|
@@ -89,6 +89,9 @@ When `modify_h0` is registered, the patch **short-circuits** the standard initia
 | `capture_overlap=True` | `export_ovlp` | `calc.overlap` returns live overlap on all ranks |
 | `capture_initial_hamiltonian=True` | `export_h0` | `calc.initial_hamiltonian` populated |
 | `modify_init_ham(...)` called | `python_func` + `modify_h0` | warmstart / scaling / custom modification |
+| `capture_first_order_hamiltonian=True` | `export_dHde` | `calc.first_order_hamiltonian` = [x, y, z] matrices (DFPT) |
+| `modify_init_first_order_ham(...)` called | `modify_dHde` | dH/de warmstart injection (pre-CPSCF) |
+| `capture_grid_data=True` | `export_grid_data` | `calc.grid_data` populated with this rank's grid subset |
 | `capture_basis_data=True` | `export_basis_data` | `calc.basis_data` populated (registered pre-`aimspy_init` because it fires during init) |
 
 Users can also register custom callbacks via `Calculator.register_callback(name, fn, aux, extra_ptr)` for advanced use cases.
@@ -268,7 +271,7 @@ Each matrix `.h5` file stores four datasets: `atom_pairs` `(N,5)`, `chunk_bounda
 
 ## FHI-aims Patch System
 
-The bundled patch (`aimspy/_patches/aimspy-patch_v0.1.0.diff`, ~1100 lines) does three things:
+Three patch versions are bundled (`v0.1.0` ~1100 lines, `v0.2.0` ~1400 lines, `v0.2.1` ~2200 lines — the latest, adding the grid/basis exports and the DFPT dH/de hooks). The patch does three things:
 
 1. **Adds `src/aimspy_api/`** with Fortran modules:
    - `callback.f90` — `TAimspyCsrMxDescr` (bind(C) struct), `TAimspyCallback` handle type, abstract callback interfaces.
@@ -282,7 +285,7 @@ The bundled patch (`aimspy/_patches/aimspy-patch_v0.1.0.diff`, ~1100 lines) does
 
 3. **Exposes `pbc_lists.f90` arrays** — adds `target` attributes to `index_hamiltonian` / `column_index_hamiltonian` so they can be exposed via `c_loc`.
 
-The patch is **versioned** (currently `v0.1.0`) and managed by the `aimspy patch` CLI, which can apply, uninstall, dry-run, and list bundled versions. Multiple patch versions can ship side-by-side; the CLI auto-detects the currently-applied version by reading a `PATCH_VERSION` line that the patch itself writes into the source tree's `Makefile`.
+The patch is **versioned** (currently `v0.2.1`) and managed by the `aimspy patch` CLI, which can apply, uninstall, dry-run, and list bundled versions. Multiple patch versions can ship side-by-side; the CLI auto-detects the currently-applied version by reading a `PATCH_VERSION` line that the patch itself writes into the source tree's `Makefile`.
 
 ## Grid Data (Real-Space)
 

@@ -212,11 +212,15 @@ class TestPlotRadialBasis:
 
     def test_rug_respects_r_max(self, h5_path):
         """Grid points beyond the x limit are not drawn."""
-        fig = plot_radial_basis(h5_path, "Xx", r_max=0.5)  # 0.5 Å ~ tiny range
+        # Fixture grid spans 1e-6 .. ~9.4e-4 bohr (50 points); r_max=1e-4
+        # bohr excludes the last ~17 points, so the filter really bites.
+        fig = plot_radial_basis(h5_path, "Xx", r_max=1e-4, angstrom=False)
         rug = fig.axes[0].collections[0]
         drawn = rug.get_segments()
-        # every drawn tick must lie within [0, 0.5] (data x coords)
-        assert all(seg[0][0] <= 0.5 + 1e-9 for seg in drawn if len(seg))
+        n_expected = int(np.log(1e-4 / 1e-6) / np.log(1.15)) + 1  # 33
+        assert 0 < len(drawn) < 50
+        assert len(drawn) == n_expected
+        assert all(seg[0][0] <= 1e-4 + 1e-12 for seg in drawn if len(seg))
 
     def test_save_png(self, h5_path, tmp_path):
         out = tmp_path / "xx_basis.png"
@@ -351,3 +355,155 @@ class TestCLIVizGrid:
         result = runner.invoke(viz_grid_cmd, [str(npz), "rho", "--mode", "radial"])
         assert result.exit_code != 0
         assert "atom-index" in result.output
+
+
+class TestCLIErrorPaths:
+    """Malformed inputs must surface as clean CLI errors, not tracebacks."""
+
+    def _invoke(self, cmd, args):
+        from click.testing import CliRunner
+
+        result = CliRunner().invoke(cmd, args)
+        assert result.exit_code == 1
+        assert result.exception is not None
+        # ClickException (handled) — not an unhandled crash:
+        assert "Traceback" not in result.output
+        return result
+
+    # ---- viz-basis ----
+
+    def test_viz_basis_corrupt_h5(self, tmp_path):
+        from aimspy._cli_viz import viz_basis_cmd
+
+        bad = tmp_path / "basis.h5"
+        bad.write_bytes(b"this is not an HDF5 file" * 10)
+
+        result = self._invoke(viz_basis_cmd, [str(bad), "-o", str(tmp_path / "out")])
+        assert "Error:" in result.output
+
+    def test_viz_basis_missing_dataset(self, tmp_path, h5_path):
+        """A group missing its datasets (e.g. a partially-failed save)."""
+        import h5py
+
+        from aimspy._cli_viz import viz_basis_cmd
+
+        broken = tmp_path / "broken.h5"
+        with h5py.File(broken, "w") as src, h5py.File(h5_path, "r") as ref:
+            src.create_group("Xx")  # empty group: no spline datasets
+            src.attrs["species_list"] = list(ref.attrs.get("species_list", ["Xx"]))
+            src.attrs["n_species"] = 1
+
+        result = self._invoke(viz_basis_cmd, [str(broken), "-o", str(tmp_path / "out")])
+        assert "Error:" in result.output
+
+    def test_viz_basis_bad_r_max(self, h5_path, tmp_path):
+        from aimspy._cli_viz import viz_basis_cmd
+
+        for bad in ("-1.0", "0", "nan"):
+            result = self._invoke(
+                viz_basis_cmd,
+                [str(h5_path), "--r-max", bad, "-o", str(tmp_path / "out")],
+            )
+            assert "r_max" in result.output
+
+    def test_viz_basis_output_dir_is_file(self, h5_path, tmp_path):
+        """click's own Path(file_okay=False) rejects this cleanly (exit 2)."""
+        from click.testing import CliRunner
+
+        from aimspy._cli_viz import viz_basis_cmd
+
+        blocker = tmp_path / "blocker"
+        blocker.write_text("i am a file")
+
+        result = CliRunner().invoke(viz_basis_cmd, [str(h5_path), "-o", str(blocker)])
+        assert result.exit_code == 2  # usage error, message, no traceback
+        assert "Traceback" not in result.output
+
+    # ---- viz-grid ----
+
+    def test_viz_grid_corrupt_npz(self, tmp_path):
+        from aimspy._cli_viz import viz_grid_cmd
+
+        bad = tmp_path / "grid.npz"
+        bad.write_bytes(b"PK\x03\x04 definitely not a zip archive")
+
+        result = self._invoke(viz_grid_cmd, [str(bad), "rho"])
+        assert "Error:" in result.output
+
+    def test_viz_grid_truncated_npz(self, tmp_path):
+        from aimspy._cli_viz import viz_grid_cmd
+
+        bad = tmp_path / "grid.npz"
+        bad.write_bytes(b"PK\x03\x04")  # zip signature, nothing else
+
+        result = self._invoke(viz_grid_cmd, [str(bad), "rho"])
+        assert "Error:" in result.output
+
+    def test_viz_grid_unknown_field(self, tmp_path):
+        from aimspy._cli_viz import viz_grid_cmd
+        from .conftest import make_grid
+
+        npz = tmp_path / "grid.npz"
+        make_grid().save_npz(npz)
+
+        result = self._invoke(viz_grid_cmd, [str(npz), "no_such_field"])
+        assert "no_such_field" in result.output
+
+    def test_viz_grid_atom_index_out_of_range(self, tmp_path):
+        from aimspy._cli_viz import viz_grid_cmd
+        from .conftest import make_grid
+
+        npz = tmp_path / "grid.npz"
+        make_grid().save_npz(npz)
+
+        result = self._invoke(
+            viz_grid_cmd, [str(npz), "rho", "--mode", "radial", "--atom-index", "99"]
+        )
+        assert "Error:" in result.output
+
+    def test_viz_grid_bad_output_path(self, tmp_path):
+        from aimspy._cli_viz import viz_grid_cmd
+        from .conftest import make_grid
+
+        npz = tmp_path / "grid.npz"
+        make_grid().save_npz(npz)
+
+        # nonexistent parent directory -> savefig OSError
+        result = self._invoke(
+            viz_grid_cmd,
+            [str(npz), "rho", "-o", str(tmp_path / "no" / "dir" / "f.png")],
+        )
+        assert "Error:" in result.output
+
+
+class TestDecodeSym:
+    """_decode_sym must accept both str and bytes (h5py version safety)."""
+
+    def test_str_passthrough(self):
+        from aimspy.viz_basis import _decode_sym
+
+        assert _decode_sym("Mo") == "Mo"
+
+    def test_bytes_decoded(self):
+        from aimspy.viz_basis import _decode_sym
+
+        assert _decode_sym(b"Mo") == "Mo"
+
+    def test_bytes_attr_file_read(self, h5_path):
+        """list_elements on a file whose species_list attr is stored as
+        fixed-length bytes (legacy style) still returns str symbols."""
+        import h5py
+
+        from aimspy.viz_basis import list_elements
+
+        import shutil
+
+        legacy = h5_path.parent / "legacy.h5"
+        shutil.copy(h5_path, legacy)
+        with h5py.File(legacy, "a") as f:
+            lst = [
+                s.encode() if isinstance(s, str) else s for s in f.attrs["species_list"]
+            ]
+            f.attrs["species_list"] = np.array(lst, dtype="S4")
+
+        assert list_elements(legacy) == ["Xx"]

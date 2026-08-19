@@ -366,6 +366,12 @@ class Calculator:
 
         self._work_dir.mkdir(parents=True, exist_ok=True)
 
+        # Becomes True immediately before the aimspy_init call.  If init()
+        # fails before that point (bad config, missing lib symbol, invalid
+        # pending callback name, ...), the Fortran runtime was NEVER
+        # initialized and calling aimspy_finalize() on it would run
+        # aims_finalize on a never-initialized runtime — skip it entirely.
+        _init_started = False
         try:
             with chdir_cm(self._work_dir):
                 self._copy_inputs()
@@ -416,6 +422,7 @@ class Calculator:
                 self._pending_callbacks = deferred_later
 
                 self._log_info("aimspy_init")
+                _init_started = True
                 self._binding.aimspy_init(
                     _py2f(comm),
                     str(self._cfg.logfile).encode("UTF-8"),
@@ -454,7 +461,12 @@ class Calculator:
             self._state = CalcState.FAILED
             self._log_error("init() failed; attempting cleanup")
             self._release_large_runtime_arrays()
-            self._defensive_finalize()
+            # Only finalize the Fortran runtime if aimspy_init was actually
+            # entered (it may have failed mid-way, leaving runtime state to
+            # clean up).  If we never got that far, finalize would tear down
+            # a runtime that was never initialized.
+            if _init_started:
+                self._defensive_finalize()
             self._clear_all_state()
             raise
         return self
@@ -1099,6 +1111,12 @@ class Calculator:
         if self._state == CalcState.UNINIT:
             self._pending_callbacks.append((name, fn, aux, extra_ptr))
             return
+        if self._state == CalcState.FAILED:
+            raise AimspyStateError(
+                "register_callback in FAILED state: the previous operation "
+                "aborted and the Fortran runtime is in an unknown state; "
+                "call close() and create a new Calculator instead"
+            )
         if self._cb_mgr is None:
             raise AimspyStateError(
                 "register_callback: callback manager unavailable "
@@ -1614,9 +1632,11 @@ class Calculator:
                 aux,
             )
 
-        # 9. export_basis_data — registered in pre-init (before aimspy_init)
-        # because it fires inside prepare_scf during aimspy_init itself.
-        # No re-registration needed here; is_registered() returns True.
+        # 9. export_basis_data — never wired here.  It fires inside
+        # prepare_scf during aimspy_init itself, so it is registered in
+        # the pre-init phase of init() (see the capture_basis_data block
+        # and the pending-registration split); by the time this method
+        # runs it has either already fired or was never requested.
 
 
 # =============================================================================

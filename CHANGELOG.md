@@ -41,11 +41,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and log-grid rug markers.  New CLI commands
   `aimspy viz-basis` (all elements, `-j` parallel) and
   `aimspy viz-grid` (scatter/contour/radial over `GridData` npz).
-- `tests/unit/test_basis_data.py` (17 tests),
-  `tests/unit/test_viz_basis.py` (27 tests),
+- `tests/unit/test_basis_data.py` (22 tests),
+  `tests/unit/test_viz_basis.py` (39 tests),
   `tests/test_basis_export.py` (integration test, 35 checks),
   `tests/test_basis_callback_paths.py` (integration test: pre-init
   registration / init-time error surfacing / user-precedence).
+- `tests/unit/test_viz_basis.py::TestCLIErrorPaths` — CLI error-path
+  regression tests (corrupt h5/npz, missing datasets, NaN/negative
+  `--r-max`, bad `-o` paths).
+- **`[viz]` optional dependency extra** — `pip install aimspy[viz]`
+  installs matplotlib + scipy for the visualization helpers; the CLI
+  commands now fail with an install hint instead of a raw
+  `ModuleNotFoundError` when they are missing.
+- `docs/architecture.md` — full architecture reference (layered
+  design, ABI/callback inventory, state machine, execution timelines,
+  conventions, memory-ownership rules, known limitations).
+- Makefile targets `test-grid-data-capture`, `test-basis-export`,
+  `test-basis-callback-paths` (previously runnable only by hand);
+  `test-integration` now includes them.
 
 ### Changed
 
@@ -60,12 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same pattern as `modify_h0_registered`).
 - **viz defaults** — `scatter_slice` marker size `s` 2.0 → 5.0,
   `slice_contour` `levels` 50 → 60 (denser atom-centred grids stay
-  readable).
-- **`register_callback('export_basis_data', ...)` timing** — a pre-init
-  registration is now applied *before* `aimspy_init` (previously deferred
-  until after init, at which point the callback had already fired and would
-  never be called).  A post-init registration now issues a
-  `UserWarning` for the same reason.
+  readable).  The new defaults are now pinned by unit tests.
+- **Docs refresh** — `key_concepts.md` patch-system section now
+  describes all three bundled versions (latest `v0.2.1`), the callback
+  wiring table covers all 8 config-driven callbacks (grid/dHde rows
+  added), and the trigger-point list includes `DFPT_module.f90`;
+  `api_reference.rst` preamble clarifies the import path of the viz
+  helpers; README Core Features gains the NAO basis capture entry and
+  an `[viz]` install note.
+- **`register_callback('export_basis_data', ...)` timing** — the
+  registration semantics are: a pre-init registration is applied *before*
+  `aimspy_init` (the callback fires inside `aimspy_init` itself, so this
+  is the only point at which it can take effect).  Registering after
+  `init()` issues a `UserWarning` — by then the callback has already
+  fired and would never be called.
 - **Init-time callback errors** — exceptions raised inside callbacks that
   fire during `aimspy_init` (`export_basis_data`) now surface as
   `AimspyCallbackError` from `init()` itself, instead of being deferred
@@ -73,6 +94,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CLI tracebacks on malformed input** — `aimspy viz-basis` /
+  `aimspy viz-grid` now wrap their entire command bodies (including
+  file loading, plotting, and figure saving) and convert library-level
+  exceptions (`ValueError`/`IndexError`/`KeyError`/`OSError`/`TypeError`
+  /`EOFError`/`BadZipFile`) into clean `Error:` messages instead of raw
+  tracebacks.  Previously e.g. a corrupt `basis.h5` or truncated `.npz`
+  crashed with a full traceback, the interactive (no `-o`) path of
+  `viz-basis` had no wrapping at all, and `viz-basis` did not catch
+  `KeyError`/`OSError`.  `--r-max nan` is now rejected (`r_max must be
+  a positive finite number`) instead of silently producing an empty
+  plot.
+- **`aimspy_finalize` on a never-initialized runtime** — two pre-init
+  failure paths (older libaims lacking
+  `aimspy_register_export_basis_data_callback` + `capture_basis_data`,
+  and an invalid pending callback name) reached the init()-error
+  handler's `_defensive_finalize`, calling `aimspy_finalize` on a
+  runtime whose `aimspy_init` never ran.  init() now tracks whether
+  `aimspy_init` was actually entered and skips the Fortran-side
+  finalize when it was not (Python-side callback reset still runs).
+- **`register_callback` in FAILED state** — the docstring promised an
+  `AimspyStateError`, but registration silently succeeded on the still
+  live callback manager.  FAILED now raises (matching FINALIZED); the
+  previous operation aborted, so registration could never be useful.
+- **`save_h5` species_list duplication on h5py 3.0.x** — the
+  read-back of the `species_list` attribute did not decode `bytes`
+  entries (returned by h5py 3.0.x for vlen-string attrs), making the
+  membership test always True and accumulating duplicate entries on
+  every save.  Entries are now decoded before the test; the empty
+  initializer is also written with an explicit string dtype (a bare
+  `[]` was stored as an empty float64 attribute).
+- **`save_h5` contiguity guard** — the per-species function-range
+  computation silently assumed species-major ordering of
+  `basisfn_species`; an interleaved ordering would have exported
+  another species' functions under the wrong element.  A loud
+  `ValueError` now fires on non-contiguous indices.
+- `tests/conftest.py` `collect_ignore` now lists
+  `test_basis_export.py` / `test_basis_callback_paths.py` — collecting
+  `tests/` directly previously aborted the whole pytest run at import
+  (`comm.Abort(1)` when `AIMSPY_TEST_AIMS_LIBPATH` is unset).
+- Vacuous `test_rug_respects_r_max` unit test now actually exercises
+  the rug filter (bohr units + r_max below the outer grid points);
+  zeta numbering is now tested through the real `save_h5` path with
+  duplicate (n, l) pairs (previously only a local re-implementation
+  was tested).
 - **Process crash on second `aimspy_init` reusing the same logfile
   (forrtl severe 104)** — `aimspy_init` opened the logfile (unit 20)
   with `status='replace'` but nothing ever closed the unit; a second

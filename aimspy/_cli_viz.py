@@ -7,10 +7,65 @@ wraps them as click commands; ``aimspy.cli`` imports and registers them.
 
 from __future__ import annotations
 
+import functools
+import zipfile
 from pathlib import Path
 from typing import Optional
 
 import click
+
+# Library-level failures that should surface as clean CLI errors rather
+# than raw tracebacks: bad values (ValueError), missing datasets/attrs
+# (KeyError), out-of-range indices (IndexError), broken/mismatched data
+# (TypeError), unreadable or missing files (OSError, EOFError) and
+# corrupt npz archives (BadZipFile).
+_CLI_ERROR_TYPES = (
+    ValueError,
+    IndexError,
+    KeyError,
+    OSError,
+    TypeError,
+    EOFError,
+    zipfile.BadZipFile,
+)
+
+
+def _wrap_cli_errors(fn):
+    """Decorator: convert library-level exceptions into clean Click errors.
+
+    Lets :class:`click.ClickException` (and keyboard interrupts, which are
+    ``BaseException``) pass through untouched.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except click.ClickException:
+            raise
+        except _CLI_ERROR_TYPES as exc:
+            raise click.ClickException(f"{type(exc).__name__}: {exc}")
+
+    return wrapper
+
+
+def _check_viz_deps(*, contour: bool = False) -> None:
+    """Fail with an install hint when optional viz dependencies are missing."""
+    try:
+        import matplotlib  # noqa: F401
+    except ImportError as exc:
+        raise click.ClickException(
+            f"matplotlib is required for visualization ({exc}); "
+            "install it with: pip install aimspy[viz]"
+        )
+    if contour:
+        try:
+            import scipy  # noqa: F401
+        except ImportError as exc:
+            raise click.ClickException(
+                f"scipy is required for contour mode ({exc}); "
+                "install it with: pip install aimspy[viz]"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +120,7 @@ import click
     show_default=True,
     help="Figure format (with -o).",
 )
+@_wrap_cli_errors
 def viz_basis_cmd(
     h5_path: Path,
     kind: str,
@@ -85,6 +141,8 @@ def viz_basis_cmd(
     shown interactively; with -o they are saved (nothing is displayed).
     """
     from .viz_basis import list_elements
+
+    _check_viz_deps()
 
     elements = list_elements(h5_path)
     if not elements:
@@ -128,21 +186,16 @@ def viz_basis_cmd(
         for element in elements
     ]
 
-    try:
-        if jobs > 1 and len(tasks) > 1:
-            from concurrent.futures import ProcessPoolExecutor
+    if jobs > 1 and len(tasks) > 1:
+        from concurrent.futures import ProcessPoolExecutor
 
-            with ProcessPoolExecutor(max_workers=jobs) as pool:
-                for element, out_path in pool.map(_plot_element_worker, tasks):
-                    click.echo(f"saved {out_path}")
-        else:
-            for task in tasks:
-                element, out_path = _plot_element_worker(task)
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            for element, out_path in pool.map(_plot_element_worker, tasks):
                 click.echo(f"saved {out_path}")
-    except (ValueError, IndexError) as exc:
-        # Library-level validation (bad r_max, unknown element, ...)
-        # surfacing as a clean CLI error instead of a traceback.
-        raise click.ClickException(str(exc))
+    else:
+        for task in tasks:
+            element, out_path = _plot_element_worker(task)
+            click.echo(f"saved {out_path}")
 
 
 def _plot_element_worker(task):
@@ -255,6 +308,7 @@ def _plot_element_worker(task):
     default=None,
     help="Save the figure here (format from suffix) instead of showing it.",
 )
+@_wrap_cli_errors
 def viz_grid_cmd(
     npz_path: Path,
     field: str,
@@ -281,54 +335,51 @@ def viz_grid_cmd(
     from .grid_data import GridData
     from . import viz
 
+    _check_viz_deps(contour=(mode == "contour"))
+
     grid = GridData.load_npz(npz_path)
 
-    try:
-        if mode == "radial":
-            if atom_index is None:
-                raise click.ClickException("--mode radial requires --atom-index.")
-            ax = viz.radial_profile(
-                grid,
-                field,
-                atom_index=atom_index,
-                angstrom=not bohr,
-                logy=not lin_y,
-            )
-            fig = ax.figure
-        elif mode == "scatter":
-            ax = viz.scatter_slice(
-                grid,
-                field,
-                axis=axis,
-                center=center,
-                width=width,
-                log=log_,
-                symlog=symlog,
-                linthresh=linthresh,
-                angstrom=not bohr,
-                s=point_size,
-            )
-            fig = ax.figure
-        else:
-            ax = viz.slice_contour(
-                grid,
-                field,
-                axis=axis,
-                center=center,
-                width=width,
-                nx=nx,
-                ny=ny,
-                log=log_,
-                symlog=symlog,
-                linthresh=linthresh,
-                angstrom=not bohr,
-                levels=levels,
-            )
-            fig = ax.figure
-    except (ValueError, IndexError, KeyError) as exc:
-        # Unknown field name, out-of-range atom index, bad shapes, ...
-        # → clean CLI error instead of a traceback.
-        raise click.ClickException(str(exc))
+    if mode == "radial":
+        if atom_index is None:
+            raise click.ClickException("--mode radial requires --atom-index.")
+        ax = viz.radial_profile(
+            grid,
+            field,
+            atom_index=atom_index,
+            angstrom=not bohr,
+            logy=not lin_y,
+        )
+        fig = ax.figure
+    elif mode == "scatter":
+        ax = viz.scatter_slice(
+            grid,
+            field,
+            axis=axis,
+            center=center,
+            width=width,
+            log=log_,
+            symlog=symlog,
+            linthresh=linthresh,
+            angstrom=not bohr,
+            s=point_size,
+        )
+        fig = ax.figure
+    else:
+        ax = viz.slice_contour(
+            grid,
+            field,
+            axis=axis,
+            center=center,
+            width=width,
+            nx=nx,
+            ny=ny,
+            log=log_,
+            symlog=symlog,
+            linthresh=linthresh,
+            angstrom=not bohr,
+            levels=levels,
+        )
+        fig = ax.figure
 
     if output is not None:
         fig.savefig(str(output), dpi=150, bbox_inches="tight")

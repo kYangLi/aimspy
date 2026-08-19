@@ -36,6 +36,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+viz = [
+    "matplotlib>=3.5",
+    "scipy>=1.10",
+]
+
 dev = [
     "pytest>=7.0",
     "ruff>=0.1.0",

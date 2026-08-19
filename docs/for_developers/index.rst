@@ -6,5 +6,6 @@ This section contains comprehensive guides for community contributors and develo
 .. toctree::
     :maxdepth: 2
 
+    architecture
     collaboration_guide
     development_guide

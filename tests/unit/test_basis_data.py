@@ -187,6 +187,14 @@ class TestSplineEvaluation:
         phi = bd.evaluate_phi(0, r, sp_arr)
         np.testing.assert_allclose(phi, u / r, rtol=1e-14)
 
+    def test_evaluate_phi_origin_and_negative(self):
+        """phi(0) = 0 by convention; phi(r < 0) = 0 (out of domain)."""
+        bd = _make_basis_1species(n_grid=50, n_fns=1)
+        sp_arr = np.array([0], dtype=np.int32)
+        r = np.array([0.0, -1e-3, -5.0])
+        phi = bd.evaluate_phi(0, r, sp_arr)
+        np.testing.assert_array_equal(phi, [0.0, 0.0, 0.0])
+
     def test_evaluate_du_dr(self):
         """du/dr should match the analytic derivative."""
         bd = _make_basis_1species(n_grid=200, n_fns=1)
@@ -396,3 +404,98 @@ class TestH5RoundTrip:
             np.testing.assert_allclose(
                 f["H"]["spline_wave"][:], original.spline_wave[:, :, :50], rtol=1e-14
             )
+
+    def test_zeta_real_path_duplicate_nl(self, tmp_path):
+        """Duplicate (n,l) through the real save_h5 path (not the local
+        _compute_zeta copy): n=[2,2,2], l=[1,1,0] -> zeta [0,1,0]."""
+        h5py = pytest.importorskip("h5py")
+        bd = _make_basis_1species(n_grid=50, n_fns=3)
+
+        class MockInfo:
+            basisfn_species = np.array([0, 0, 0], dtype=np.int32)
+            basisfn_n = np.array([2, 2, 2], dtype=np.int32)
+            basisfn_l = np.array([1, 1, 0], dtype=np.int32)
+            basisfn_type = ["atomic", "atomic", "atomic"]
+            species_elements = ["Xx"]
+            species_z = np.array([99.0])
+
+        h5_path = tmp_path / "zeta.h5"
+        bd.save_h5(h5_path, MockInfo())
+
+        with h5py.File(str(h5_path), "r") as f:
+            np.testing.assert_array_equal(f["Xx"]["zeta"][:], [0, 1, 0])
+
+    def test_noncontiguous_species_raises(self, tmp_path):
+        """Interleaved basisfn_species must fail loudly, not silently
+        export another species' functions under the wrong element."""
+        pytest.importorskip("h5py")
+
+        class InterleavedInfo:
+            basisfn_species = np.array([0, 1, 0], dtype=np.int32)
+            basisfn_n = np.array([1, 2, 1], dtype=np.int32)
+            basisfn_l = np.array([0, 0, 0], dtype=np.int32)
+            basisfn_type = ["atomic", "atomic", "atomic"]
+            species_elements = ["Aa", "Bb"]
+            species_z = np.array([1.0, 2.0])
+
+        bd3 = _make_basis_1species(n_grid=50, n_fns=3)
+        with pytest.raises(ValueError, match="not contiguous"):
+            bd3.save_h5(tmp_path / "bad.h5", InterleavedInfo())
+
+    def test_legacy_bytes_species_list_no_duplicates(self, tmp_path):
+        """A file whose species_list attr reads back as bytes (h5py 3.0.x
+        legacy) must not accumulate duplicate entries on re-save."""
+        h5py = pytest.importorskip("h5py")
+        bd = _make_basis_1species(n_grid=50, n_fns=2)
+
+        class MockInfo:
+            basisfn_species = np.array([0, 0], dtype=np.int32)
+            basisfn_n = np.array([1, 2], dtype=np.int32)
+            basisfn_l = np.array([0, 0], dtype=np.int32)
+            basisfn_type = ["atomic", "atomic"]
+            species_elements = ["H"]
+            species_z = np.array([1.0])
+
+        h5_path = tmp_path / "legacy.h5"
+
+        # Create the "legacy" file: bytes-valued species_list, H group
+        # already present (as if written by an older save).
+        bd.save_h5(h5_path, MockInfo())
+        with h5py.File(str(h5_path), "a") as f:
+            # Overwrite the attr with fixed-length bytes (reads back as
+            # bytes on every h5py version).
+            f.attrs["species_list"] = np.array([b"H"], dtype="S2")
+            assert isinstance(f.attrs["species_list"][0], bytes)
+
+        # Re-save: H is skipped, but the bytes entry must be recognized
+        # instead of being re-appended as a duplicate str.
+        results = bd.save_h5(h5_path, MockInfo())
+        assert results == {"H": False}
+        with h5py.File(str(h5_path), "r") as f:
+            lst = [
+                s.decode() if isinstance(s, bytes) else str(s)
+                for s in f.attrs["species_list"]
+            ]
+            assert lst == ["H"]
+            assert f.attrs["n_species"] == 1
+
+    def test_new_file_species_list_is_string_dtype(self, tmp_path):
+        """The empty species_list initializer must be a string-typed
+        attribute, not float64."""
+        h5py = pytest.importorskip("h5py")
+        bd = _make_basis_1species(n_grid=50, n_fns=2)
+
+        class MockInfo:
+            basisfn_species = np.array([0, 0], dtype=np.int32)
+            basisfn_n = np.array([1, 2], dtype=np.int32)
+            basisfn_l = np.array([0, 0], dtype=np.int32)
+            basisfn_type = ["atomic", "atomic"]
+            species_elements = ["H"]
+            species_z = np.array([1.0])
+
+        h5_path = tmp_path / "dtype.h5"
+        bd.save_h5(h5_path, MockInfo())
+
+        with h5py.File(str(h5_path), "r") as f:
+            lst = f.attrs["species_list"]
+            assert all(isinstance(s, str) for s in lst)

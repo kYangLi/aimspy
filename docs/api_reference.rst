@@ -3,7 +3,10 @@ API Reference
 
 This page documents the full public API of AimsPy. All symbols below
 are importable from the top-level ``aimspy`` package
-(e.g. ``from aimspy import Calculator``).
+(e.g. ``from aimspy import Calculator``), except the visualization
+helpers of ``aimspy.viz`` / ``aimspy.viz_basis``, which are imported
+from their submodules
+(e.g. ``from aimspy.viz_basis import plot_radial_basis``).
 
 Calculator
 ----------

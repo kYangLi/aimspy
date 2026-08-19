@@ -150,6 +150,140 @@ class TestCallbackManagerClear:
 
 
 # =============================================================================
+# init() failure paths: defensive finalize gating (never-initialized runtime)
+class _FakeCDLL:
+    """Mimics ``ctypes.CDLL`` exposing only a chosen subset of symbols."""
+
+    def __init__(self, symbols, fail_on_init=False):
+        self.calls = []
+        self._fail_on_init = fail_on_init
+        for name in symbols:
+            setattr(self, name, self._make_fn(name))
+
+    def _make_fn(self, name):
+        def _fn(*args, **kwargs):
+            self.calls.append(name)
+            if name == "aimspy_init" and self._fail_on_init:
+                raise RuntimeError("simulated mid-init failure")
+
+        return _fn
+
+
+class _FakeComm:
+    rank = 0
+
+    def Barrier(self):
+        pass
+
+    def py2f(self):
+        return 0
+
+
+class TestInitFailureFinalize:
+    """aimspy_finalize must only run if aimspy_init was actually entered."""
+
+    def _make_calc(self, capture_basis):
+        cfg = CalculatorConfig(lib_path="/fake/libaims.so")
+        if capture_basis:
+            cfg.capture_basis_data = True
+        return Calculator(cfg)
+
+    def test_failure_before_aimspy_init_skips_finalize(self, monkeypatch, tmp_path):
+        """Old libaims lacking the basis-register symbol: registration fails
+        pre-init, so the runtime was never initialized — finalize must NOT
+        be called on it."""
+        from aimspy import calculator as calc_mod
+        from aimspy._exceptions import AimspyBindingError
+
+        # Old library: lifecycle symbols present, basis register absent.
+        old_lib = _FakeCDLL(["aimspy_init", "aimspy_run", "aimspy_finalize"])
+        monkeypatch.setattr(calc_mod, "load_aims_lib", lambda _p: old_lib)
+
+        calc = self._make_calc(capture_basis=True)
+        with pytest.raises(AimspyBindingError):
+            calc.init(comm=_FakeComm(), work_dir=tmp_path)
+
+        assert calc._state == CalcState.FINALIZED
+        assert "aimspy_finalize" not in old_lib.calls
+        assert "aimspy_init" not in old_lib.calls  # failed before reaching it
+
+    def test_failure_during_aimspy_init_still_finalizes(self, monkeypatch, tmp_path):
+        """aimspy_init raising mid-way leaves runtime state behind — the
+        defensive finalize must run."""
+        from aimspy import calculator as calc_mod
+
+        lib = _FakeCDLL(
+            ["aimspy_init", "aimspy_run", "aimspy_finalize"], fail_on_init=True
+        )
+        monkeypatch.setattr(calc_mod, "load_aims_lib", lambda _p: lib)
+
+        calc = self._make_calc(capture_basis=False)
+        with pytest.raises(RuntimeError, match="mid-init"):
+            calc.init(comm=_FakeComm(), work_dir=tmp_path)
+
+        assert calc._state == CalcState.FINALIZED
+        assert "aimspy_finalize" in lib.calls  # defensive cleanup happened
+
+    def test_invalid_pending_callback_pre_init_skips_finalize(
+        self, monkeypatch, tmp_path
+    ):
+        """An invalid callback name in the pending list raises during the
+        pre-init split — again before any Fortran runtime exists."""
+        from aimspy import calculator as calc_mod
+        from aimspy._exceptions import AimspyCallbackError
+
+        lib = _FakeCDLL(["aimspy_init", "aimspy_run", "aimspy_finalize"])
+        monkeypatch.setattr(calc_mod, "load_aims_lib", lambda _p: lib)
+
+        calc = self._make_calc(capture_basis=False)
+        calc.register_callback("no_such_callback", lambda aux: None)  # deferred
+        with pytest.raises(AimspyCallbackError):
+            calc.init(comm=_FakeComm(), work_dir=tmp_path)
+
+        assert calc._state == CalcState.FINALIZED
+        assert "aimspy_finalize" not in lib.calls
+        assert "aimspy_init" not in lib.calls
+
+
+# =============================================================================
+# register_callback state matrix
+class TestRegisterCallbackStates:
+    """register_callback must follow its documented state contract:
+    UNINIT defers, INITED applies, DONE warns, FAILED/FINALIZED raise."""
+
+    def test_failed_state_raises(self, calc):
+        from aimspy._exceptions import AimspyStateError
+
+        calc._state = CalcState.FAILED
+        with pytest.raises(AimspyStateError, match="FAILED"):
+            calc.register_callback("export_h0", lambda aux, h, nh, ns: None)
+
+    def test_finalized_state_raises(self, calc):
+        from aimspy._exceptions import AimspyStateError
+
+        calc._state = CalcState.FINALIZED
+        with pytest.raises(AimspyStateError):
+            calc.register_callback("export_h0", lambda aux, h, nh, ns: None)
+
+    def test_uninit_defers(self, calc):
+        calc.register_callback("export_h0", lambda aux, h, nh, ns: None)
+        assert len(calc._pending_callbacks) == 1
+
+    def test_done_warns_but_registers(self, calc):
+        from unittest.mock import MagicMock
+
+        import warnings
+
+        calc._state = CalcState.DONE
+        calc._cb_mgr = MagicMock()
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            calc.register_callback("export_h0", lambda aux, h, nh, ns: None)
+        assert any("never fire" in str(w.message) for w in rec)
+        calc._cb_mgr.register.assert_called_once()
+
+
+# =============================================================================
 # Reference-cycle regression tests
 # =============================================================================
 class TestNoReferenceCycles:

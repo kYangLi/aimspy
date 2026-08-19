@@ -58,6 +58,9 @@ For the most comprehensive usage documentation, please visit [https://docs.deeph
 - **Real-Space Grid Data Capture:**
   Export converged density, Kohn-Sham potential, and grid geometry for post-processing and analysis. Includes vdW potential when enabled in FHI-aims.
 
+- **NAO Radial Basis Capture:**
+  Export the complete cubic-spline representation of all numerical atomic-orbital radial basis functions (u(r), kinetic, derivative) during `init()`, and build reusable per-element `basis.h5` basis libraries for offline inspection and plotting (`aimspy viz-basis`).
+
 
 ## Runtime Environment
 
@@ -95,6 +98,12 @@ Development version:
 
 ```bash
 pip install git+https://github.com/kYangLi/aimspy
+```
+
+Plotting helpers (`aimspy viz-basis` / `aimspy viz-grid` and the `aimspy.viz` / `aimspy.viz_basis` modules) additionally require matplotlib (and scipy for contour mode); install them with:
+
+```bash
+pip install aimspy[viz]
 ```
 
 AimsPy loads a *patched* `libaims.so` at runtime. To patch an FHI-aims source tree:

@@ -415,11 +415,21 @@ class BasisData:
         # NOTE: this assumes each species' radial functions occupy a
         # contiguous index range in basisfn_* — guaranteed by aims'
         # shrink_fixed_basis_phi_thresh loop ordering (species outer loop).
+        # The contiguity is validated below so a future reordering on
+        # either side fails loudly instead of silently exporting another
+        # species' functions under the wrong element.
         species_fn_ranges: List[Tuple[int, int]] = []  # (start, end) per species
         for sp in range(self.n_species):
             mask = info.basisfn_species == sp
             indices = np.where(mask)[0]
             if len(indices) > 0:
+                if not np.array_equal(indices, np.arange(indices[0], indices[-1] + 1)):
+                    raise ValueError(
+                        f"species {sp} ({info.species_elements[sp]}): radial basis "
+                        f"functions are not contiguous in basisfn_species "
+                        f"(indices {indices[:5].tolist()}...); save_h5 requires "
+                        "species-major ordering"
+                    )
                 species_fn_ranges.append((int(indices[0]), int(indices[-1]) + 1))
             else:
                 species_fn_ranges.append((0, 0))
@@ -427,13 +437,15 @@ class BasisData:
         results: Dict[str, bool] = {}
 
         with h5py.File(str(path), "a") as f:
-            # Initialize root attrs if new file
+            # Initialize root attrs if new file.  The empty species_list is
+            # written with an explicit string dtype (a bare [] would be
+            # stored as an empty float64 attribute).
             if "format_version" not in f.attrs:
                 f.attrs["format_version"] = "1.0"
                 f.attrs["generator"] = "aimspy"
                 f.attrs["date"] = datetime.date.today().isoformat()
                 f.attrs["units"] = "atomic"
-                f.attrs["species_list"] = []
+                f.attrs["species_list"] = np.array([], dtype=h5py.string_dtype())
                 f.attrs["n_species"] = 0
 
             for sp in range(self.n_species):
@@ -497,8 +509,14 @@ class BasisData:
 
                 results[element] = True
 
-            # Update root species list
-            existing = list(f.attrs.get("species_list", []))
+            # Update root species list.  Decode entries defensively:
+            # h5py 3.0.x returned vlen-string attrs as bytes, which would
+            # otherwise make the membership test below always True and
+            # accumulate duplicates across saves.
+            existing = [
+                s.decode("utf-8") if isinstance(s, bytes) else str(s)
+                for s in f.attrs.get("species_list", [])
+            ]
             for elem, added in results.items():
                 if added and elem not in existing:
                     existing.append(elem)

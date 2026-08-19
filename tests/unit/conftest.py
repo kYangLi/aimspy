@@ -7,7 +7,6 @@ Provides:
 - ``make_grid``: factory producing deterministic mock GridData objects
   (lifted from the former test_viz.py local helper; shared by the
   GridData-viz and CLI tests).
-- ``mock_grid``: a default ``make_grid()`` instance.
 """
 
 from __future__ import annotations
@@ -107,18 +106,6 @@ def make_grid(n=60, n_atoms=2, seed=1, with_structure=False):
         rho0=(rng.random(n) + 0.05) * 4.0 * np.pi,
         **kwargs,
     )
-
-
-@pytest.fixture
-def make_grid_factory():
-    """Factory fixture wrapping :func:`make_grid` (customizable per test)."""
-    return make_grid
-
-
-@pytest.fixture
-def mock_grid():
-    """A default deterministic mock GridData (see :func:`make_grid`)."""
-    return make_grid()
 
 
 @pytest.fixture(autouse=True)

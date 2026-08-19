@@ -240,8 +240,8 @@ def plot_radial_basis(
         r_display_max = float(np.max(basis.outer_radius)) * factor
     else:
         r_display_max = float(r_max)
-        if r_display_max <= 0.0:
-            raise ValueError(f"r_max must be positive; got {r_max!r}")
+        if not (r_display_max > 0.0):  # rejects <= 0 and NaN
+            raise ValueError(f"r_max must be a positive finite number; got {r_max!r}")
 
     # Plot grid (display units).  Linear x: uniform linspace from 0.
     # Log x: uniform *linspace in log r* anchored at r_grid_min, so the

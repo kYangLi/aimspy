@@ -4,8 +4,8 @@ pyvista-dependent ``isosurface`` is tested only for its ImportError guard
 (pyvista is not installed in the test environment).  matplotlib figures are
 built with the non-interactive Agg backend.
 
-The mock-grid builder lives in ``tests/unit/conftest.py`` (``make_grid`` /
-``make_grid_factory``), shared with the CLI visualization tests.
+The mock-grid builder lives in ``tests/unit/conftest.py`` (``make_grid``),
+shared with the CLI visualization tests.
 """
 
 from __future__ import annotations
@@ -151,3 +151,24 @@ class TestIsosurfaceGuard:
         except ImportError:
             with pytest.raises(ImportError, match="pyvista"):
                 viz.isosurface(g, "rho", iso=1.0, show=False)
+
+
+class TestVizDefaults:
+    """Pin the documented plotting defaults (changed in v0.2.1:
+    scatter s 2.0 -> 5.0, contour levels 50 -> 60)."""
+
+    def test_scatter_slice_defaults(self):
+        import inspect
+
+        from aimspy import viz
+
+        params = inspect.signature(viz.scatter_slice).parameters
+        assert params["s"].default == 5.0
+
+    def test_slice_contour_defaults(self):
+        import inspect
+
+        from aimspy import viz
+
+        params = inspect.signature(viz.slice_contour).parameters
+        assert params["levels"].default == 60
