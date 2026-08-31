@@ -252,7 +252,10 @@ some_directory/
 
 Each matrix `.h5` file stores four datasets: `atom_pairs` `(N,5)`, `chunk_boundaries` `(N+1,)`, `chunk_shapes` `(N,2)`, and `entries` `(M,)`. The atom order in `POSCAR` is **element-grouped** (different from aims native order); `DeepHData` handles the reordering via `AimspyStructure.atom_permutation`.
 
-`force.h5` uses a different MD-style layout: `cell` `(3,3)`, `energy` (scalar), `force` `(n_atoms,3)`, `stress` `(6,)` (zeros placeholder), with `formula` and `natoms` root attributes. Forces are in eV/Å (matching `calc.forces`), energy is in eV (converted from `calc.energy` Hartree).
+`force.h5` uses a different MD-style layout: `cell` `(3,3)`, optional `energy`
+(scalar) and `force` `(n_atoms,3)`, plus `stress` `(6,)`, with `formula` and
+`natoms` root attributes. Stress uses `[xx, yy, zz, yz, xz, xy]` order and is
+filled with zeros when analytical stress is unavailable.
 
 `electric_response.h5` stores the DFPT first-order Hamiltonian (dH/de) — the response of the Hamiltonian to an electric field perturbation. It uses the same `atom_pairs` as `hamiltonian.h5`, but `chunk_shapes` rows are 3× larger (one block per Cartesian direction `[y, z, x]` = real spherical harmonics `m = -1, 0, +1`), and `entries` is 3× longer. Units are eV (converted from Hartree). Requires `electric_field_response DFPT` + `electric_field_serial .false.` in `control.in`.
 
@@ -264,10 +267,20 @@ Each matrix `.h5` file stores four datasets: `atom_pairs` `(N,5)`, `chunk_bounda
 | Overlap | dimensionless | dimensionless |
 | Coordinates | Å | Å (in POSCAR) |
 | Force | eV/Å (`calc.forces`) | eV/Å (`force.h5`) |
-| Total energy | Hartree (`calc.energy`) | eV (`force.h5` `energy` dataset) |
+| Energy label | Hartree (`calc.energy_free_relative`) | eV (`force.h5` `energy`) |
+| Stress | eV/Å³ (<code>calc.stress</code>) | eV/Å³ (<code>force.h5</code> <code>stress</code>) |
 | First-order H (dH/de) | Hartree | eV (`electric_response.h5`) |
 
-`DeepHData.from_memory` converts Hartree → eV on write; `DeepHData.to_aimspy` converts eV → Hartree on read. Force requires no unit conversion (eV/Å throughout); only atom reordering is applied. Energy in `force.h5` is converted from Hartree via `from_aimspy(force=, energy=)` or `set_force(force, structure, energy=)`. First-order Hamiltonian is converted from Hartree via `from_aimspy(first_order_hamiltonian=)` or `set_first_order_hamiltonian()`, and back to Hartree via `to_first_order_aimspy()`.
+Hamiltonian-like quantities and the energy label are converted from Hartree to
+eV. Coordinates and lattice vectors remain in Å. Forces and stress already
+arrive from `Calculator` in eV/Å and eV/Å³; only force atom ordering and stress
+tensor-to-Voigt packing are applied.
+
+For conservative force-field training, pass
+`energy=calc.energy_free_relative`.  It subtracts the composition-weighted sum
+of the radial free-atom reference energies from the force-consistent electronic
+free energy.  The references depend on the resolved species and atomic-solver
+settings, but not on the atomic positions or simulation cell.
 
 ## FHI-aims Patch System
 

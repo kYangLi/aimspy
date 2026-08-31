@@ -73,7 +73,8 @@ with Calculator(config) as calc:
         dd.save("deeph_out/")
 ```
 
-To additionally export forces and total energy to `force.h5` (useful for MD training data), pass the `force=` and `energy=` keyword arguments:
+To additionally export force-field labels to `force.h5`, pass the available
+energy, force, and stress observables:
 
 ```python
     if rank == 0:
@@ -83,12 +84,23 @@ To additionally export forces and total energy to `force.h5` (useful for MD trai
             overlap=calc.overlap,
             initial_hamiltonian=calc.initial_hamiltonian,
             force=calc.forces,    # (n_atoms, 3) eV/Å, aims order — auto-reordered to POSCAR
-            energy=calc.energy,   # Hartree — auto-converted to eV
+            energy=calc.energy_free_relative,  # Hartree — auto-converted to eV
+            stress=calc.stress,   # (3, 3) eV/Å³
         )
         dd.save("deeph_out/")    # writes force.h5 alongside H/S/H0
 ```
 
-Forces are optional: if `calc.forces` is `None` (i.e. `compute_forces .true.` not set in `control.in`), simply omit the `force=` argument. Energy is only written to `force.h5` if `force` is also set; a standalone `save_force()` call requires `force` to be set first.
+Energy and force are optional and omitted when unavailable. Stress is always
+written when `force.h5` is created: if `calc.stress` is `None`, the `(6,)`
+dataset contains zeros in `[xx, yy, zz, yz, xz, xy]` order. `calc.forces`
+requires `compute_forces .true.` and nonzero analytical stress data requires
+`compute_analytical_stress .true.` in `control.in`.
+
+`calc.energy_free_relative` is the force-consistent electronic free energy
+minus the sum of the radial free-atom reference energies that FHI-aims already
+computes for the resolved species settings.  Use
+`calc.free_atom_reference_energies` for the per-species values and
+`calc.free_atom_reference_energy` for their composition-weighted sum.
 
 > **Note**: For the DeepH on-disk data format specification (POSCAR, info.json,
 > .h5 files), see [DeepH-dock Key Concepts](https://docs.deeph-pack.com/deeph-dock/en/latest/key_concepts.html).

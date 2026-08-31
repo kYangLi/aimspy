@@ -41,8 +41,14 @@ _PROTOTYPES: dict[str, tuple[list, object]] = {
     "c_rs_overlap": ([], POINTER(c_double)),
     # ---- energy ----
     "aimspy_energy": ([], c_double),
+    "aimspy_energy_raw": ([], c_double),
+    "aimspy_energy_free": ([], c_double),
+    # ---- per-species free-atom reference energies ----
+    "aimspy_free_atom_reference_energies": ([], POINTER(c_double)),
     # ---- forces pointer ----
     "aimspy_forces": ([], POINTER(c_double)),
+    # ---- analytical stress pointer ----
+    "aimspy_stress": ([], POINTER(c_double)),
     # ---- callback registration ----
     "aimspy_register_get_descr_callback": ([GetDescrCb, c_void_p], None),
     "aimspy_register_export_ovlp_callback": ([ExportOvlpCb, c_void_p], None),

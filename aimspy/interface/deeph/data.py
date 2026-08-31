@@ -154,6 +154,314 @@ _ATOMIC_NUMBERS: dict[str, int] = {
 # -------------------------------------------------------------------
 # Conversion helpers
 # -------------------------------------------------------------------
+@dataclass(frozen=True)
+class _MatrixLayout:
+    """Validated on-disk matrix layout and entries."""
+
+    atom_pairs: np.ndarray
+    chunk_boundaries: np.ndarray
+    chunk_shapes: np.ndarray
+    entries: np.ndarray
+
+
+_MATRIX_DATASETS = ("atom_pairs", "chunk_boundaries", "chunk_shapes", "entries")
+
+
+def _layout_error(
+    source: Union[str, Path], field: str, detail: str
+) -> AimspyConfigError:
+    return AimspyConfigError(f"{Path(source).name}: {field}: {detail}")
+
+
+def _hdf5_dataset_value(h5, name, source, error_builder):
+    """Read one HDF5 dataset after rejecting groups and other objects."""
+    try:
+        obj = h5[name]
+    except (KeyError, OSError, RuntimeError) as exc:
+        raise error_builder(
+            source,
+            name,
+            "could not resolve the HDF5 object",
+        ) from exc
+    if not isinstance(obj, h5py.Dataset):
+        raise error_builder(
+            source,
+            name,
+            f"expected an HDF5 dataset, got {type(obj).__name__}",
+        )
+    try:
+        return obj[()]
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise error_builder(source, name, "could not read the HDF5 dataset") from exc
+
+
+def _orbital_counts_per_atom(
+    atom_symbols: list[str],
+    elements_orbital_map: dict[str, list[int]],
+    source: Union[str, Path],
+) -> np.ndarray:
+    counts = np.zeros(len(atom_symbols), dtype=np.int64)
+    for i, symbol in enumerate(atom_symbols):
+        if symbol not in elements_orbital_map:
+            raise _layout_error(
+                source,
+                "chunk_shapes",
+                f"element {symbol!r} is missing from elements_orbital_map",
+            )
+        try:
+            counts[i] = sum(
+                2 * int(l_value) + 1 for l_value in elements_orbital_map[symbol]
+            )
+        except (TypeError, ValueError) as exc:
+            raise _layout_error(
+                source,
+                "chunk_shapes",
+                f"invalid orbital map for element {symbol!r}",
+            ) from exc
+        if counts[i] <= 0:
+            raise _layout_error(
+                source,
+                "chunk_shapes",
+                f"element {symbol!r} has no orbitals",
+            )
+    return counts
+
+
+def _validate_matrix_layout(
+    source: Union[str, Path],
+    atom_pairs: np.ndarray,
+    chunk_boundaries: np.ndarray,
+    chunk_shapes: np.ndarray,
+    entries: np.ndarray,
+    atom_symbols: list[str],
+    elements_orbital_map: dict[str, list[int]],
+    *,
+    row_multiplier: int = 1,
+) -> _MatrixLayout:
+    """Validate one standard or first-order DeepH matrix layout."""
+    ap = np.asarray(atom_pairs)
+    cb = np.asarray(chunk_boundaries)
+    cs = np.asarray(chunk_shapes)
+    data = np.asarray(entries)
+
+    for field, arr in (
+        ("atom_pairs", ap),
+        ("chunk_boundaries", cb),
+        ("chunk_shapes", cs),
+    ):
+        if not np.issubdtype(arr.dtype, np.integer):
+            raise _layout_error(
+                source, field, f"expected integer dtype, got {arr.dtype}"
+            )
+        if arr.size:
+            limits = np.iinfo(np.int32)
+            if int(arr.min()) < limits.min or int(arr.max()) > limits.max:
+                raise _layout_error(source, field, "values exceed int32 range")
+
+    if not (
+        np.issubdtype(data.dtype, np.integer) or np.issubdtype(data.dtype, np.floating)
+    ):
+        raise _layout_error(
+            source, "entries", f"expected real numeric dtype, got {data.dtype}"
+        )
+    if data.ndim != 1:
+        raise _layout_error(source, "entries", f"expected shape (M,), got {data.shape}")
+
+    if ap.ndim != 2 or ap.shape[1:] != (5,) or ap.shape[0] == 0:
+        raise _layout_error(
+            source,
+            "atom_pairs",
+            f"expected non-empty shape (N, 5), got {ap.shape}",
+        )
+    n_pairs = ap.shape[0]
+    pair_keys = [tuple(int(value) for value in row) for row in ap]
+    if len(set(pair_keys)) != n_pairs:
+        raise _layout_error(source, "atom_pairs", "contains duplicate pair keys")
+
+    atom_indices = ap[:, 3:5].astype(np.int64, copy=False)
+    n_atoms = len(atom_symbols)
+    if np.any(atom_indices < 0) or np.any(atom_indices >= n_atoms):
+        raise _layout_error(
+            source,
+            "atom_pairs",
+            f"atom indices must be in [0, {n_atoms}), got range "
+            f"[{int(atom_indices.min())}, {int(atom_indices.max())}]",
+        )
+
+    if cs.shape != (n_pairs, 2):
+        raise _layout_error(
+            source,
+            "chunk_shapes",
+            f"expected shape ({n_pairs}, 2), got {cs.shape}",
+        )
+    cs64 = cs.astype(np.int64, copy=False)
+    if np.any(cs64 <= 0):
+        raise _layout_error(
+            source, "chunk_shapes", "all block dimensions must be positive"
+        )
+
+    orbital_counts = _orbital_counts_per_atom(
+        atom_symbols, elements_orbital_map, source
+    )
+    expected_shapes = np.column_stack(
+        (
+            orbital_counts[atom_indices[:, 0]] * int(row_multiplier),
+            orbital_counts[atom_indices[:, 1]],
+        )
+    )
+    mismatch = np.flatnonzero(np.any(cs64 != expected_shapes, axis=1))
+    if mismatch.size:
+        ip = int(mismatch[0])
+        raise _layout_error(
+            source,
+            "chunk_shapes",
+            f"pair {pair_keys[ip]} has shape {tuple(int(v) for v in cs64[ip])}; "
+            f"expected {tuple(int(v) for v in expected_shapes[ip])}",
+        )
+
+    if cb.shape != (n_pairs + 1,):
+        raise _layout_error(
+            source,
+            "chunk_boundaries",
+            f"expected shape ({n_pairs + 1},), got {cb.shape}",
+        )
+    cb64 = cb.astype(np.int64, copy=False)
+    if int(cb64[0]) != 0:
+        raise _layout_error(
+            source,
+            "chunk_boundaries",
+            f"first value must be 0, got {int(cb64[0])}",
+        )
+    deltas = np.diff(cb64)
+    if np.any(deltas < 0):
+        raise _layout_error(source, "chunk_boundaries", "values must be non-decreasing")
+    expected_sizes = cs64[:, 0] * cs64[:, 1]
+    mismatch = np.flatnonzero(deltas != expected_sizes)
+    if mismatch.size:
+        ip = int(mismatch[0])
+        raise _layout_error(
+            source,
+            "chunk_boundaries",
+            f"pair {pair_keys[ip]} span is {int(deltas[ip])}; "
+            f"expected {int(expected_sizes[ip])} from chunk_shapes",
+        )
+    if int(cb64[-1]) != int(data.shape[0]):
+        raise _layout_error(
+            source,
+            "entries",
+            f"length {data.shape[0]} does not match final boundary {int(cb64[-1])}",
+        )
+
+    return _MatrixLayout(
+        atom_pairs=np.ascontiguousarray(ap, dtype=np.int32),
+        chunk_boundaries=np.ascontiguousarray(cb, dtype=np.int32),
+        chunk_shapes=np.ascontiguousarray(cs, dtype=np.int32),
+        entries=np.ascontiguousarray(data, dtype=np.float64),
+    )
+
+
+def _read_matrix_layout(
+    file_path: Path,
+    atom_symbols: list[str],
+    elements_orbital_map: dict[str, list[int]],
+    *,
+    row_multiplier: int = 1,
+) -> _MatrixLayout:
+    with h5py.File(file_path, "r") as h5:
+        missing = [name for name in _MATRIX_DATASETS if name not in h5]
+        if missing:
+            raise _layout_error(
+                file_path,
+                missing[0],
+                f"required dataset is missing (missing: {', '.join(missing)})",
+            )
+        arrays = {
+            name: _hdf5_dataset_value(h5, name, file_path, _layout_error)
+            for name in _MATRIX_DATASETS
+        }
+    return _validate_matrix_layout(
+        file_path,
+        arrays["atom_pairs"],
+        arrays["chunk_boundaries"],
+        arrays["chunk_shapes"],
+        arrays["entries"],
+        atom_symbols,
+        elements_orbital_map,
+        row_multiplier=row_multiplier,
+    )
+
+
+def _align_matrix_layout(
+    layout: _MatrixLayout,
+    canonical: _MatrixLayout,
+    source: Union[str, Path],
+) -> np.ndarray:
+    """Return entries in canonical pair order after strict layout checks."""
+    src_index = {
+        tuple(int(value) for value in row): i for i, row in enumerate(layout.atom_pairs)
+    }
+    dst_keys = [tuple(int(value) for value in row) for row in canonical.atom_pairs]
+    dst_set = set(dst_keys)
+    src_set = set(src_index)
+    if src_set != dst_set:
+        missing = sorted(dst_set - src_set)
+        extra = sorted(src_set - dst_set)
+        raise _layout_error(
+            source,
+            "atom_pairs",
+            f"pair set differs from canonical layout; "
+            f"missing={missing[:3]}, extra={extra[:3]}",
+        )
+
+    for dst_idx, key in enumerate(dst_keys):
+        src_idx = src_index[key]
+        src_shape = tuple(int(value) for value in layout.chunk_shapes[src_idx])
+        dst_shape = tuple(int(value) for value in canonical.chunk_shapes[dst_idx])
+        if src_shape != dst_shape:
+            raise _layout_error(
+                source,
+                "chunk_shapes",
+                f"pair {key} has shape {src_shape}; canonical shape is {dst_shape}",
+            )
+
+    if np.array_equal(layout.atom_pairs, canonical.atom_pairs):
+        if not np.array_equal(layout.chunk_shapes, canonical.chunk_shapes):
+            raise _layout_error(
+                source, "chunk_shapes", "layout differs from canonical layout"
+            )
+        if not np.array_equal(layout.chunk_boundaries, canonical.chunk_boundaries):
+            raise _layout_error(
+                source, "chunk_boundaries", "layout differs from canonical layout"
+            )
+        return layout.entries
+
+    return _reorder_flat_entries(
+        layout.entries,
+        layout.atom_pairs,
+        layout.chunk_boundaries,
+        canonical.atom_pairs,
+        canonical.chunk_boundaries,
+    )
+
+
+def _first_order_canonical_layout(canonical: _MatrixLayout) -> _MatrixLayout:
+    chunk_shapes = canonical.chunk_shapes.copy()
+    chunk_shapes[:, 0] *= 3
+    sizes = np.prod(chunk_shapes.astype(np.int64), axis=1)
+    boundaries64 = np.concatenate(([0], np.cumsum(sizes, dtype=np.int64)))
+    if int(boundaries64[-1]) > np.iinfo(np.int32).max:
+        raise AimspyConfigError(
+            "electric_response.h5: chunk_boundaries exceed int32 range"
+        )
+    boundaries = boundaries64.astype(np.int32)
+    return _MatrixLayout(
+        atom_pairs=canonical.atom_pairs.copy(),
+        chunk_boundaries=boundaries,
+        chunk_shapes=chunk_shapes,
+        entries=np.empty(int(boundaries[-1]), dtype=np.float64),
+    )
+
+
 def _reorder_flat_entries(
     entries: np.ndarray,
     src_atom_pairs: np.ndarray,
@@ -321,6 +629,170 @@ def _compute_occupation(atom_symbols: list[str]) -> int:
 # DeepH direction order: [y, z, x] = indices [1, 2, 0] into Cartesian [x, y, z]
 _DIR_DEEPH_FROM_CART = [1, 2, 0]
 
+# DeepH force-field stress convention: [xx, yy, zz, yz, xz, xy].
+_STRESS_VOIGT_INDICES = ((0, 0), (1, 1), (2, 2), (1, 2), (0, 2), (0, 1))
+
+
+def _force_field_error(
+    source: Union[str, Path], field: str, detail: str
+) -> AimspyConfigError:
+    """Build a field-specific error for DeepH ``force.h5`` data."""
+    return AimspyConfigError(f"{Path(source).name}: {field}: {detail}")
+
+
+def _validate_force(
+    force: np.ndarray,
+    n_atoms: int,
+    source: Union[str, Path],
+) -> np.ndarray:
+    arr = np.asarray(force)
+    if not (
+        np.issubdtype(arr.dtype, np.integer) or np.issubdtype(arr.dtype, np.floating)
+    ):
+        raise _force_field_error(
+            source, "force", f"expected real numeric dtype, got {arr.dtype}"
+        )
+    expected_shape = (n_atoms, 3)
+    if arr.shape != expected_shape:
+        raise _force_field_error(
+            source,
+            "force",
+            f"expected shape {expected_shape}, got {arr.shape}",
+        )
+    result = np.ascontiguousarray(arr, dtype=np.float64)
+    if not np.isfinite(result).all():
+        raise _force_field_error(source, "force", "values must all be finite")
+    return result
+
+
+def _validate_energy_eV(
+    energy_eV: float,
+    source: Union[str, Path],
+) -> float:
+    arr = np.asarray(energy_eV)
+    if arr.shape != ():
+        raise _force_field_error(
+            source, "energy", f"expected a scalar, got shape {arr.shape}"
+        )
+    if not (
+        np.issubdtype(arr.dtype, np.integer) or np.issubdtype(arr.dtype, np.floating)
+    ):
+        raise _force_field_error(
+            source, "energy", f"expected real numeric dtype, got {arr.dtype}"
+        )
+    result = float(arr)
+    if not np.isfinite(result):
+        raise _force_field_error(source, "energy", "value must be finite")
+    return result
+
+
+def _validate_stress(
+    stress: np.ndarray,
+    source: Union[str, Path],
+) -> np.ndarray:
+    """Return a symmetric ``(3, 3)`` stress tensor in eV/Angstrom^3."""
+    arr = np.asarray(stress)
+    if not (
+        np.issubdtype(arr.dtype, np.integer) or np.issubdtype(arr.dtype, np.floating)
+    ):
+        raise _force_field_error(
+            source, "stress", f"expected real numeric dtype, got {arr.dtype}"
+        )
+    arr = np.asarray(arr, dtype=np.float64)
+    if not np.isfinite(arr).all():
+        raise _force_field_error(source, "stress", "values must all be finite")
+    if arr.shape == (1, 6):
+        arr = arr[0]
+    if arr.shape == (6,):
+        tensor = np.zeros((3, 3), dtype=np.float64)
+        for value, (i, j) in zip(arr, _STRESS_VOIGT_INDICES):
+            tensor[i, j] = value
+            tensor[j, i] = value
+    elif arr.shape == (3, 3):
+        tensor = np.ascontiguousarray(arr)
+        if not np.allclose(tensor, tensor.T, rtol=1e-10, atol=1e-12):
+            raise _force_field_error(source, "stress", "3x3 tensor must be symmetric")
+    else:
+        raise _force_field_error(
+            source,
+            "stress",
+            f"expected shape (6,), (1, 6), or (3, 3), got {arr.shape}",
+        )
+    return np.ascontiguousarray(tensor)
+
+
+def _stress_to_voigt(stress: np.ndarray) -> np.ndarray:
+    tensor = _validate_stress(stress, "force.h5")
+    return np.asarray(
+        [tensor[i, j] for i, j in _STRESS_VOIGT_INDICES], dtype=np.float64
+    )
+
+
+def _read_force_h5(
+    file_path: Path,
+    n_atoms: int,
+    lattice: np.ndarray,
+) -> tuple[Optional[np.ndarray], Optional[float], Optional[np.ndarray]]:
+    """Read and validate optional DeepH force-field labels."""
+    with h5py.File(file_path, "r") as h5:
+        if "cell" in h5:
+            cell = np.asarray(
+                _hdf5_dataset_value(h5, "cell", file_path, _force_field_error)
+            )
+            if not (
+                np.issubdtype(cell.dtype, np.integer)
+                or np.issubdtype(cell.dtype, np.floating)
+            ):
+                raise _force_field_error(
+                    file_path,
+                    "cell",
+                    f"expected real numeric dtype, got {cell.dtype}",
+                )
+            cell = np.asarray(cell, dtype=np.float64)
+            if cell.shape != (3, 3):
+                raise _force_field_error(
+                    file_path, "cell", f"expected shape (3, 3), got {cell.shape}"
+                )
+            if not np.isfinite(cell).all():
+                raise _force_field_error(file_path, "cell", "values must all be finite")
+            if not np.allclose(cell, lattice, rtol=1e-10, atol=1e-10):
+                raise _force_field_error(
+                    file_path, "cell", "does not match the POSCAR lattice"
+                )
+
+        force = (
+            _validate_force(
+                _hdf5_dataset_value(h5, "force", file_path, _force_field_error),
+                n_atoms,
+                file_path,
+            )
+            if "force" in h5
+            else None
+        )
+        energy_eV = (
+            _validate_energy_eV(
+                _hdf5_dataset_value(h5, "energy", file_path, _force_field_error),
+                file_path,
+            )
+            if "energy" in h5
+            else None
+        )
+        stress = (
+            _validate_stress(
+                _hdf5_dataset_value(h5, "stress", file_path, _force_field_error),
+                file_path,
+            )
+            if "stress" in h5
+            else None
+        )
+    if force is None and energy_eV is None and stress is None:
+        raise _force_field_error(
+            file_path,
+            "datasets",
+            "at least one of energy, force, or stress must be present",
+        )
+    return force, energy_eV, stress
+
 
 def _build_first_order_entries(
     blocks_list: list[dict[tuple[int, ...], np.ndarray]],
@@ -378,8 +850,9 @@ class DeepHData:
       - ``hamiltonian_init.h5`` — *optional* — same layout, initial Hamiltonian
         entries (the ``0`` in the filename denotes the initial Hamiltonian,
         per DeepH on-disk convention)
-      - ``force.h5``        — *optional* — MD-style: cell, energy, force,
-        stress datasets (energy in eV, force in eV/Å, stress as zeros)
+      - ``force.h5``        — *optional* — MD-style: cell plus available
+        energy and force labels (eV and eV/Å), and stress in eV/Å³.  When
+        analytical stress is unavailable, the on-disk stress label is six zeros.
 
     Can also be constructed in-memory via ``from_memory`` or from
     aimspy standard-format matrices via ``from_aimspy``.
@@ -414,7 +887,7 @@ class DeepHData:
     _fo_chunk_boundaries: Optional[np.ndarray] = None
     _fo_chunk_shapes: Optional[np.ndarray] = None
 
-    # force / energy (optional, for MD-style force.h5 export)
+    # force-field labels (optional, for MD-style force.h5 export)
     force: Optional[np.ndarray] = None  # (n_atoms, 3) float64, eV/Å, POSCAR order
     energy_eV: Optional[float] = None  # scalar, eV
 
@@ -423,6 +896,9 @@ class DeepHData:
 
     # pre-specified save path (set by from_directory / from_aimspy / path= kwarg)
     path: Optional[Path] = None
+
+    # Added after the legacy positional fields to keep direct construction compatible.
+    stress: Optional[np.ndarray] = None  # (3, 3) float64, eV/Å³
 
     # ----------------------------------------------------------------
     # Construction from directory
@@ -433,8 +909,10 @@ class DeepHData:
 
         Requires POSCAR + info.json + at least one matrix file
         (``hamiltonian.h5``, ``overlap.h5``, or ``hamiltonian_init.h5``).
-        Optionally reads ``force.h5`` (MD-style format: cell/energy/force/stress)
-        if present.  Sets ``self.path = path`` for subsequent ``save_*()`` calls.
+        Optionally reads ``force.h5`` (MD-style format: cell plus any available
+        energy/force/stress labels) if present.  Stress is normalized to a
+        symmetric ``(3, 3)`` tensor in eV/Å³.  Sets ``self.path = path`` for
+        subsequent ``save_*()`` calls.
         """
         path = Path(path)
         if not path.is_dir():
@@ -475,33 +953,21 @@ class DeepHData:
             n_basis = _compute_n_basis(atom_symbols, eom)
         fermi_eV = info.get("fermi_energy_eV", 0.0)
 
-        # Read CSR layout from the first found file (canonical layout)
-        first_name, first_path = found[0]
-        with h5py.File(first_path, "r") as f:
-            atom_pairs = f["atom_pairs"][:].astype(np.int32)
-            cb = f["chunk_boundaries"][:].astype(np.int32)
-            cs = f["chunk_shapes"][:].astype(np.int32)
+        # Validate every standard matrix independently, then align it to the
+        # first available file's canonical atom-pair order.
+        loaded = [
+            (name, p, _read_matrix_layout(p, atom_symbols, eom)) for name, p in found
+        ]
+        canonical = loaded[0][2]
+        atom_pairs = canonical.atom_pairs
+        cb = canonical.chunk_boundaries
+        cs = canonical.chunk_shapes
 
-        # Read each matrix; validate / reorder atom_pairs against the
-        # canonical layout (entries are reordered per-pair if the file
-        # uses a different but equivalent pair ordering).
         entries = None
         overlap_entries = None
         init_entries = None
-        for name, p in found:
-            with h5py.File(p, "r") as f:
-                data = f["entries"][:].astype(np.float64)
-                if p != first_path:
-                    ap_check = f["atom_pairs"][:].astype(np.int32)
-                    if not np.array_equal(ap_check, atom_pairs):
-                        cb_check = f["chunk_boundaries"][:].astype(np.int32)
-                        data = _reorder_flat_entries(
-                            data,
-                            ap_check,
-                            cb_check,
-                            atom_pairs,
-                            cb,
-                        )
+        for name, p, layout in loaded:
+            data = _align_matrix_layout(layout, canonical, p)
             if name == "hamiltonian":
                 entries = data
             elif name == "overlap":
@@ -509,21 +975,15 @@ class DeepHData:
             elif name == "initial_hamiltonian":
                 init_entries = data
 
-        # Check for optional force.h5 (different format from matrix .h5)
+        # Check for optional force.h5 (different format from matrix .h5).
         force_path = path / "force.h5"
         force_arr = None
         energy_val = None
+        stress_arr = None
         if force_path.is_file():
-            with h5py.File(force_path, "r") as f:
-                force_arr = f["force"][:].astype(np.float64)
-                if "energy" in f:
-                    energy_val = float(f["energy"][()])
-            expected_shape = (len(atom_symbols), 3)
-            if force_arr.shape != expected_shape:
-                raise AimspyConfigError(
-                    f"force.h5: force shape {force_arr.shape} doesn't match "
-                    f"expected {expected_shape}"
-                )
+            force_arr, energy_val, stress_arr = _read_force_h5(
+                force_path, len(atom_symbols), lattice
+            )
 
         # Check for optional electric_response.h5 (dH/de, same atom_pairs as
         # hamiltonian.h5 but chunk_shapes/boundaries expanded 3× per pair).
@@ -532,45 +992,16 @@ class DeepHData:
         fo_cb = None
         fo_cs = None
         if fo_path.is_file():
-            with h5py.File(fo_path, "r") as f:
-                fo_entries = f["entries"][:].astype(np.float64)
-                fo_cb = f["chunk_boundaries"][:].astype(np.int32)
-                fo_cs = f["chunk_shapes"][:].astype(np.int32)
-                fo_ap = f["atom_pairs"][:].astype(np.int32)
-            # Internal consistency + cross-file atom_pairs validation
-            if np.any(fo_cs[:, 0] % 3 != 0):
-                raise AimspyConfigError(
-                    "electric_response.h5: chunk_shapes[:, 0] not all "
-                    "divisible by 3 (corrupted file?)"
-                )
-            if int(fo_cb[-1]) != int(fo_entries.shape[0]):
-                raise AimspyConfigError(
-                    f"electric_response.h5: chunk_boundaries[-1]={int(fo_cb[-1])} "
-                    f"!= len(entries)={int(fo_entries.shape[0])}"
-                )
-            if not np.array_equal(fo_ap, atom_pairs):
-                # Reorder entries into the canonical atom_pairs order.  The
-                # destination chunk layout must be the 3×-expanded one (each
-                # first-order block is (3*nr, nc)), so rebuild it from the
-                # canonical standard chunk_shapes first, then use it as dst.
-                n_pairs = atom_pairs.shape[0]
-                fo_cs_new = np.zeros((n_pairs, 2), dtype=np.int32)
-                fo_cb_new = np.zeros((n_pairs + 1,), dtype=np.int32)
-                for ip in range(n_pairs):
-                    nr = int(cs[ip, 0])
-                    nc = int(cs[ip, 1])
-                    fo_cs_new[ip, 0] = 3 * nr
-                    fo_cs_new[ip, 1] = nc
-                    fo_cb_new[ip + 1] = fo_cb_new[ip] + 3 * nr * nc
-                fo_entries = _reorder_flat_entries(
-                    fo_entries,
-                    fo_ap,
-                    fo_cb,
-                    atom_pairs,
-                    fo_cb_new,
-                )
-                fo_cs = fo_cs_new
-                fo_cb = fo_cb_new
+            fo_layout = _read_matrix_layout(
+                fo_path,
+                atom_symbols,
+                eom,
+                row_multiplier=3,
+            )
+            fo_canonical = _first_order_canonical_layout(canonical)
+            fo_entries = _align_matrix_layout(fo_layout, fo_canonical, fo_path)
+            fo_cb = fo_canonical.chunk_boundaries
+            fo_cs = fo_canonical.chunk_shapes
 
         return cls(
             lattice=lattice,
@@ -589,6 +1020,7 @@ class DeepHData:
             _fo_chunk_shapes=fo_cs,
             force=force_arr,
             energy_eV=energy_val,
+            stress=stress_arr,
             fermi_energy_eV=fermi_eV,
             path=path,
         )
@@ -611,6 +1043,7 @@ class DeepHData:
             list[dict[tuple[int, ...], np.ndarray]]
         ] = None,
         path: Optional[Union[str, Path]] = None,
+        stress: Optional[np.ndarray] = None,
     ) -> "DeepHData":
         """Build from in-memory pair-block dicts.
 
@@ -619,10 +1052,10 @@ class DeepHData:
         Hamiltonian / initial_hamiltonian blocks in **Hartree**
         (converted to eV here). Overlap blocks are dimensionless.
 
-        *force* and *energy_eV* are optional per-atom / scalar data for
-        MD-style ``force.h5`` export. *force* is ``(n_atoms, 3)`` in
-        eV/Å, already in **POSCAR atom order** (matching *atom_coords*).
-        *energy_eV* is a scalar in eV.
+        *force*, *energy_eV*, and *stress* are optional labels for MD-style
+        ``force.h5`` export. *force* is ``(n_atoms, 3)`` in eV/Å, already in
+        **POSCAR atom order** (matching *atom_coords*); *energy_eV* is a scalar
+        in eV; *stress* is a symmetric ``(3, 3)`` tensor in eV/Å³.
 
         *first_order_hamiltonian_blocks* is an optional list of 3 block
         dicts ``[x, y, z]`` in **Hartree** (converted to eV here). The
@@ -715,15 +1148,13 @@ class DeepHData:
             init = np.concatenate(init_ham_lst)
             init *= HARTREE_TO_EV  # Hartree → eV
 
-        # Validate force shape if provided
+        # Validate optional force-field labels without changing their units.
         if force is not None:
-            force = np.asarray(force, dtype=np.float64)
-            expected_shape = (len(atom_symbols), 3)
-            if force.shape != expected_shape:
-                raise AimspyConfigError(
-                    f"force shape {force.shape} doesn't match "
-                    f"expected {expected_shape}"
-                )
+            force = _validate_force(force, len(atom_symbols), "from_memory")
+        if energy_eV is not None:
+            energy_eV = _validate_energy_eV(energy_eV, "from_memory")
+        if stress is not None:
+            stress = _validate_stress(stress, "from_memory")
 
         # Optional first-order Hamiltonian (dH/de) — 3 block dicts [x, y, z].
         # Stored in DeepH order [y, z, x] (= m = -1, 0, +1) per atom pair.
@@ -755,6 +1186,7 @@ class DeepHData:
             _fo_chunk_shapes=fo_cs,
             force=force,
             energy_eV=energy_eV,
+            stress=stress,
             fermi_energy_eV=fermi_energy_eV,
             path=Path(path) if path is not None else None,
         )
@@ -774,6 +1206,7 @@ class DeepHData:
         force: Optional[np.ndarray] = None,
         energy: Optional[float] = None,
         first_order_hamiltonian: Optional[list] = None,
+        stress: Optional[np.ndarray] = None,
     ) -> "DeepHData":
         """Build from aimspy standard-format matrices + structure.
 
@@ -800,18 +1233,25 @@ class DeepHData:
             Forces ``(n_atoms, 3)`` in eV/Å, **aims atom order**.
             Reordered to POSCAR order inside.
         energy : float, optional
-            Total energy in **Hartree** (converted to eV inside).
+            DeepH energy target in **Hartree** (converted to eV inside).  DeepH
+            force-field training normally subtracts free-atom reference
+            energies; pass :attr:`Calculator.energy_free_relative` for the
+            force-consistent reference-subtracted target.
         first_order_hamiltonian : list[AimspyMatrix], optional
             Electric-response first-order Hamiltonian ``dH/de`` — a list
             of 3 ``AimspyMatrix`` in Cartesian order ``[x, y, z]``
             (Hartree, aims atom order). Reordered to POSCAR order and
             concatenated per atom pair in DeepH order ``[y, z, x]``.
+        stress : np.ndarray, optional
+            Symmetric analytical stress tensor ``(3, 3)`` in eV/Å³.  The
+            Cartesian frame and FHI-aims sign convention are preserved.
 
         .. note::
 
-            *force*, *energy* and *first_order_hamiltonian* are
-            keyword-only (placed after *path*) to preserve
-            backward-compatible positional ordering of *template*.
+            *force*, *energy*, *first_order_hamiltonian*, and *stress* are
+            placed after *path* to preserve the positional ordering of the
+            pre-existing matrix and *template* arguments. Passing these
+            observables by keyword is recommended.
         """
         if (
             hamiltonian is None
@@ -872,12 +1312,7 @@ class DeepHData:
         force_poscar = None
         if force is not None:
             _, new2old = structure.build_atom_permutation()
-            force_arr = np.asarray(force, dtype=np.float64)
-            if force_arr.shape != (structure.n_atoms, 3):
-                raise AimspyConfigError(
-                    f"force shape {force_arr.shape} doesn't match "
-                    f"expected ({structure.n_atoms}, 3)"
-                )
+            force_arr = _validate_force(force, structure.n_atoms, "from_aimspy")
             force_poscar = np.ascontiguousarray(force_arr[new2old])
 
         # Energy: Hartree → eV
@@ -897,6 +1332,7 @@ class DeepHData:
             energy_eV=energy_eV_val,
             first_order_hamiltonian_blocks=first_order_blocks_list,
             path=path,
+            stress=stress,
         )
 
     # ----------------------------------------------------------------
@@ -940,8 +1376,9 @@ class DeepHData:
         force_aims: np.ndarray,
         structure: "AimspyStructure",
         energy: Optional[float] = None,
+        stress: Optional[np.ndarray] = None,
     ) -> None:
-        """Store force (eV/Å) and optionally energy (Hartree→eV) from aims order.
+        """Store DeepH force-field labels from AimsPy observables.
 
         Parameters
         ----------
@@ -951,18 +1388,21 @@ class DeepHData:
         structure : AimspyStructure
             Provides the aims→POSCAR atom permutation.
         energy : float, optional
-            Total energy in **Hartree** (converted to eV), or None.
+            DeepH energy target in **Hartree** (converted to eV), or None.
+            Use :attr:`Calculator.energy_free_relative` for the standard
+            force-consistent reference-subtracted target.
+        stress : np.ndarray, optional
+            Symmetric analytical stress ``(3, 3)`` in eV/Å³.
         """
-        force_arr = np.asarray(force_aims, dtype=np.float64)
-        if force_arr.shape != (structure.n_atoms, 3):
-            raise AimspyConfigError(
-                f"force shape {force_arr.shape} doesn't match "
-                f"expected ({structure.n_atoms}, 3)"
-            )
+        force_arr = _validate_force(force_aims, structure.n_atoms, "set_force")
         _, new2old = structure.build_atom_permutation()
         self.force = np.ascontiguousarray(force_arr[new2old])
         if energy is not None:
-            self.energy_eV = float(energy) * HARTREE_TO_EV
+            self.energy_eV = _validate_energy_eV(
+                float(energy) * HARTREE_TO_EV, "set_force"
+            )
+        if stress is not None:
+            self.stress = _validate_stress(stress, "set_force")
 
     def set_first_order_hamiltonian(
         self,
@@ -1015,28 +1455,60 @@ class DeepHData:
         return self.path
 
     def _write_matrix_h5(self, file_path: Path, entries: np.ndarray) -> None:
+        layout = _validate_matrix_layout(
+            file_path,
+            self.atom_pairs,
+            self.chunk_boundaries,
+            self.chunk_shapes,
+            entries,
+            self.atom_symbols,
+            self.elements_orbital_map,
+        )
         with h5py.File(file_path, "w") as f:
-            f.create_dataset("atom_pairs", data=self.atom_pairs, dtype="i4")
-            f.create_dataset("chunk_boundaries", data=self.chunk_boundaries, dtype="i4")
-            f.create_dataset("chunk_shapes", data=self.chunk_shapes, dtype="i4")
-            f.create_dataset("entries", data=entries)
+            f.create_dataset("atom_pairs", data=layout.atom_pairs, dtype="i4")
+            f.create_dataset(
+                "chunk_boundaries", data=layout.chunk_boundaries, dtype="i4"
+            )
+            f.create_dataset("chunk_shapes", data=layout.chunk_shapes, dtype="i4")
+            f.create_dataset("entries", data=layout.entries)
 
     def _write_force_h5(self, file_path: Path) -> None:
         """Write force.h5 in DeepH MD convention.
 
-        Datasets: ``cell`` (3,3), ``energy`` scalar, ``force`` (n_atoms,3),
-        ``stress`` (6,) zeros placeholder.
+        Always writes ``cell`` (3,3) and ``stress`` (6,).  Available ``energy``
+        scalar and ``force`` (n_atoms,3) labels are written conditionally.
+        Stress uses DeepH order ``[xx, yy, zz, yz, xz, xy]``; when
+        :attr:`stress` is ``None``, six zeros are written.
         Root attrs: ``formula`` = ``b'X{natoms}'``, ``natoms`` = int64.
-
-        ``energy`` is written as 0.0 if ``energy_eV`` is None.
         """
         n_atoms = self.n_atoms
-        energy_val = float(self.energy_eV) if self.energy_eV is not None else 0.0
+        lattice = np.asarray(self.lattice, dtype=np.float64)
+        if lattice.shape != (3, 3) or not np.isfinite(lattice).all():
+            raise _force_field_error(
+                file_path, "cell", "expected a finite (3, 3) lattice"
+            )
+        force = (
+            _validate_force(self.force, n_atoms, file_path)
+            if self.force is not None
+            else None
+        )
+        energy_eV = (
+            _validate_energy_eV(self.energy_eV, file_path)
+            if self.energy_eV is not None
+            else None
+        )
+        stress_voigt = (
+            _stress_to_voigt(self.stress)
+            if self.stress is not None
+            else np.zeros(6, dtype=np.float64)
+        )
         with h5py.File(file_path, "w") as f:
-            f.create_dataset("cell", data=self.lattice, dtype="f8")
-            f.create_dataset("energy", data=energy_val)
-            f.create_dataset("force", data=self.force, dtype="f8")
-            f.create_dataset("stress", data=np.zeros(6, dtype=np.float64))
+            f.create_dataset("cell", data=lattice, dtype="f8")
+            if energy_eV is not None:
+                f.create_dataset("energy", data=energy_eV)
+            if force is not None:
+                f.create_dataset("force", data=force, dtype="f8")
+            f.create_dataset("stress", data=stress_voigt, dtype="f8")
             f.attrs["formula"] = np.bytes_(f"X{n_atoms}".encode("utf-8"))
             f.attrs["natoms"] = np.int64(n_atoms)
 
@@ -1074,13 +1546,14 @@ class DeepHData:
         )
 
     def save_force(self, path: Optional[Union[str, Path]] = None) -> None:
-        """Write force.h5 (requires force to be set).
+        """Write available energy, force, and stress labels to force.h5.
 
-        Energy is written if ``energy_eV`` is set, else 0.0.
-        Stress is always written as zeros (placeholder).
+        At least one in-memory label must be present. Missing energy and force
+        labels are omitted; missing stress is written as six zeros for DeepH
+        compatibility.
         """
-        if self.force is None:
-            raise AimspyConfigError("No force data to save")
+        if self.force is None and self.energy_eV is None and self.stress is None:
+            raise AimspyConfigError("No energy, force, or stress data to save")
         p = Path(path) if path is not None else self._require_path()
         p.mkdir(parents=True, exist_ok=True)
         self._write_force_h5(p / "force.h5")
@@ -1104,13 +1577,24 @@ class DeepHData:
             )
         p = Path(path) if path is not None else self._require_path()
         p.mkdir(parents=True, exist_ok=True)
-        with h5py.File(p / "electric_response.h5", "w") as f:
-            f.create_dataset("atom_pairs", data=self.atom_pairs, dtype="i4")
+        file_path = p / "electric_response.h5"
+        layout = _validate_matrix_layout(
+            file_path,
+            self.atom_pairs,
+            self._fo_chunk_boundaries,
+            self._fo_chunk_shapes,
+            self.first_order_hamiltonian_entries,
+            self.atom_symbols,
+            self.elements_orbital_map,
+            row_multiplier=3,
+        )
+        with h5py.File(file_path, "w") as f:
+            f.create_dataset("atom_pairs", data=layout.atom_pairs, dtype="i4")
             f.create_dataset(
-                "chunk_boundaries", data=self._fo_chunk_boundaries, dtype="i4"
+                "chunk_boundaries", data=layout.chunk_boundaries, dtype="i4"
             )
-            f.create_dataset("chunk_shapes", data=self._fo_chunk_shapes, dtype="i4")
-            f.create_dataset("entries", data=self.first_order_hamiltonian_entries)
+            f.create_dataset("chunk_shapes", data=layout.chunk_shapes, dtype="i4")
+            f.create_dataset("entries", data=layout.entries)
 
     def save(self, path: Optional[Union[str, Path]] = None) -> None:
         """Write all non-None content to *path* (default: self.path).
@@ -1127,7 +1611,11 @@ class DeepHData:
             self.save_initial_hamiltonian(p)
         if self.first_order_hamiltonian_entries is not None:
             self.save_first_order_hamiltonian(p)
-        if self.force is not None:
+        if (
+            self.force is not None
+            or self.energy_eV is not None
+            or self.stress is not None
+        ):
             self.save_force(p)
 
     @property
@@ -1150,6 +1638,8 @@ class DeepHData:
             extra.append("+dHde")
         if self.force is not None:
             extra.append("+F")
+        if self.stress is not None:
+            extra.append("+stress")
         tag = " ".join(extra)
         # Summarize species as element -> count (a full per-atom list is
         # unreadable for large supercells).
@@ -1179,10 +1669,10 @@ class DeepHData:
 
         .. note::
 
-            Only the Hamiltonian is converted.  Force and energy (if
-            loaded from ``force.h5``) are accessible directly via the
-            ``self.force`` and ``self.energy_eV`` attributes — they do
-            **not** participate in the warmstart injection path.
+            Only the Hamiltonian is converted.  Force-field labels loaded from
+            ``force.h5`` are accessible directly via ``self.force``,
+            ``self.energy_eV``, and ``self.stress`` — they do **not**
+            participate in the warmstart injection path.
 
         Parameters
         ----------
@@ -1316,11 +1806,41 @@ def _read_poscar(path: Path) -> tuple[np.ndarray, list[str], np.ndarray]:
     lines = path.read_text().splitlines()
     lines = [ln.strip() for ln in lines if ln.strip()]
 
-    scale = float(lines[1])
-    lat = scale * np.array(
+    scale_tokens = lines[1].split()
+    if len(scale_tokens) != 1:
+        raise AimspyConfigError(
+            f"{path.name}: scale: expected one scalar, got {len(scale_tokens)} values"
+        )
+    try:
+        scale = float(scale_tokens[0])
+    except ValueError as exc:
+        raise AimspyConfigError(
+            f"{path.name}: scale: invalid floating-point value {scale_tokens[0]!r}"
+        ) from exc
+    if not np.isfinite(scale) or scale == 0.0:
+        raise AimspyConfigError(
+            f"{path.name}: scale: expected a finite non-zero scalar, got {scale!r}"
+        )
+
+    raw_lattice = np.array(
         [[float(x) for x in lines[i].split()] for i in range(2, 5)],
         dtype=np.float64,
     )
+    if not np.all(np.isfinite(raw_lattice)):
+        raise AimspyConfigError(f"{path.name}: lattice: contains non-finite values")
+    if scale < 0.0:
+        raw_volume = abs(float(np.linalg.det(raw_lattice)))
+        if not np.isfinite(raw_volume) or raw_volume == 0.0:
+            raise AimspyConfigError(
+                f"{path.name}: scale: negative target-volume scale requires "
+                "a finite non-singular lattice"
+            )
+        factor = (abs(scale) / raw_volume) ** (1.0 / 3.0)
+    else:
+        factor = scale
+    if not np.isfinite(factor):
+        raise AimspyConfigError(f"{path.name}: scale: computed factor is non-finite")
+    lat = factor * raw_lattice
 
     # detect VASP5 (element line)
     tokens6 = lines[5].split()
@@ -1339,13 +1859,25 @@ def _read_poscar(path: Path) -> tuple[np.ndarray, list[str], np.ndarray]:
         symbols_on_line = lines[0].split()
         coord_start = 6  # line 6 may be coord-type or coordinate
 
-    # Skip optional "Selective dynamics" and mandatory coordinate-type line
-    while coord_start < len(lines):
+    # Parse optional Selective Dynamics and the mandatory coordinate mode.
+    if coord_start >= len(lines):
+        raise AimspyConfigError(f"{path.name}: coordinates: missing coordinate mode")
+    token = lines[coord_start].split()[0].lower()
+    if token.startswith("s"):
+        coord_start += 1
+        if coord_start >= len(lines):
+            raise AimspyConfigError(
+                f"{path.name}: coordinates: missing mode after Selective Dynamics"
+            )
         token = lines[coord_start].split()[0].lower()
-        if token in ("cartesian", "direct", "selective", "kartesian", "d"):
-            coord_start += 1
-        else:
-            break
+
+    if token in {"direct", "d"}:
+        coord_mode = "direct"
+    elif token in {"cartesian", "c", "kartesian", "k"}:
+        coord_mode = "cartesian"
+    else:
+        raise AimspyConfigError(f"{path.name}: coordinates: unsupported mode {token!r}")
+    coord_start += 1
 
     # expand symbols
     atom_symbols: list[str] = []
@@ -1364,12 +1896,10 @@ def _read_poscar(path: Path) -> tuple[np.ndarray, list[str], np.ndarray]:
     for i in range(n_atoms):
         coords[i] = [float(x) for x in lines[coord_start + i].split()[:3]]
 
-    # handle Direct coords
-    coord_type = lines[coord_start - 1].split()[0].lower()
-    if coord_type == "selective":
-        coord_type = lines[coord_start - 2].split()[0].lower()
-    if coord_type.startswith("d"):
+    if coord_mode == "direct":
         coords = coords @ lat
+    else:
+        coords *= factor
 
     return lat, atom_symbols, coords
 

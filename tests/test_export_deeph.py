@@ -85,7 +85,8 @@ try:
         h_init_aimspy = calc.initial_hamiltonian
         structure = calc.structure
         forces_aimspy = calc.forces  # (n_atoms, 3) eV/Å, aims order
-        energy_hartree = calc.energy  # Hartree
+        stress_aimspy = calc.stress  # (3, 3) eV/Å³ or None
+        energy_relative_hartree = calc.energy_free_relative
 
         _info(f"  H:       {H_aimspy.n_pairs} pairs")
         _info(f"  S:       {S_aimspy.n_pairs} pairs")
@@ -98,7 +99,8 @@ try:
             )
         else:
             _info("  forces:  None (compute_forces not set)")
-        _info(f"  energy:  {energy_hartree:.6f} Hartree")
+        _info(f"  energy_relative:  {energy_relative_hartree:.6f} Hartree")
+        _info(f"  stress:  {'present' if stress_aimspy is not None else 'None'}")
 
         # =================================================================
         # Step 2: Export to deeph_out/
@@ -114,7 +116,8 @@ try:
             overlap=S_aimspy,
             initial_hamiltonian=h_init_aimspy,
             force=forces_aimspy,
-            energy=energy_hartree,
+            energy=energy_relative_hartree,
+            stress=stress_aimspy,
         )
         _info(f"  DeepHData: {dd}")
         _info(f"  n_basis: {dd.n_basis}")
@@ -155,7 +158,9 @@ try:
         csr_diff = np.max(np.abs(ref_H_txt[0, :trim] - H_csr[0, :trim]))
         all_ok &= _ok(
             "DeepH→aimspy→aims CSR vs rs_hamiltonian.out",
-            csr_diff < 1e-10,
+            # The plain-text reference is rounded on output; the independent
+            # in-memory H_init roundtrip below retains the stricter 1e-10 check.
+            csr_diff < 1e-8,
             f"max|diff|={csr_diff:.2e}",
         )
 
@@ -229,10 +234,18 @@ try:
                         "force.h5 has force dataset",
                         "force" in f and f["force"].shape == (structure.n_atoms, 3),
                     )
-                    all_ok &= _ok(
-                        "force.h5 has stress dataset",
-                        "stress" in f and f["stress"].shape == (6,),
-                    )
+                    if stress_aimspy is None:
+                        all_ok &= _ok(
+                            "force.h5 uses zero stress when unavailable",
+                            "stress" in f
+                            and f["stress"].shape == (6,)
+                            and np.array_equal(f["stress"][:], np.zeros(6)),
+                        )
+                    else:
+                        all_ok &= _ok(
+                            "force.h5 has stress dataset",
+                            "stress" in f and f["stress"].shape == (6,),
+                        )
                     # Attr checks
                     all_ok &= _ok(
                         "force.h5 has formula attr",
@@ -243,7 +256,7 @@ try:
                         "natoms" in f.attrs and int(f.attrs["natoms"]) == 3,
                     )
                     # Energy value: Hartree → eV
-                    energy_eV_expected = energy_hartree * HARTREE_TO_EV
+                    energy_eV_expected = energy_relative_hartree * HARTREE_TO_EV
                     energy_eV_disk = float(f["energy"][()])
                     all_ok &= _ok(
                         "force.h5 energy matches (Hartree→eV)",
@@ -261,6 +274,16 @@ try:
                         force_diff < 1e-10,
                         f"max|diff|={force_diff:.2e}",
                     )
+                    if stress_aimspy is not None:
+                        stress_expected = stress_aimspy[
+                            (0, 1, 2, 1, 0, 0), (0, 1, 2, 2, 2, 1)
+                        ]
+                        stress_diff = np.max(np.abs(f["stress"][:] - stress_expected))
+                        all_ok &= _ok(
+                            "force.h5 stress tensor→Voigt",
+                            stress_diff < 1e-10,
+                            f"max|diff|={stress_diff:.2e}",
+                        )
         else:
             _info("  forces not available — skipping force.h5 checks")
             all_ok = False

@@ -158,15 +158,16 @@ index 99810d70..960eaa1f 100644
              call localorb_info(info_str, use_unit,'(A)',OL_norm)
 diff --git a/src/aimspy_api/CMakeLists.txt b/src/aimspy_api/CMakeLists.txt
 new file mode 100644
-index 00000000..bc224a1a
+index 00000000..d82a5245
 --- /dev/null
 +++ b/src/aimspy_api/CMakeLists.txt
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,18 @@
 +# AimSpy API
 +# These files are added to aims1, same layer as ASI API files.
 +
 +target_sources(aims1 PRIVATE
 +    ${CMAKE_CURRENT_LIST_DIR}/callback.f90
++    ${CMAKE_CURRENT_LIST_DIR}/free_atom_reference.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/api_bank.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/info.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/register.f90
@@ -179,13 +180,12 @@ index 00000000..bc224a1a
 +        ${CMAKE_CURRENT_LIST_DIR}/main.f90
 +    )
 +endif()
-\ No newline at end of file
 diff --git a/src/aimspy_api/api_bank.f90 b/src/aimspy_api/api_bank.f90
 new file mode 100644
-index 00000000..9fd1eb1e
+index 00000000..0b39b4c5
 --- /dev/null
 +++ b/src/aimspy_api/api_bank.f90
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,131 @@
 +module aimspy_api_bank
 +
 +    use iso_c_binding
@@ -196,6 +196,7 @@ index 00000000..9fd1eb1e
 +
 +    logical :: aimspy_initialized = .false.
 +    logical :: aimspy_converged_scf = .false.
++    logical :: aimspy_stress_ready = .false.
 +
 +    real*8, allocatable, target, save :: c_hamiltonian(:, :)
 +    real*8, allocatable, target, save :: c_overlap(:)
@@ -272,6 +273,23 @@ index 00000000..9fd1eb1e
 +    end if
 +  end function aimspy_energy
 +
++  real*8 function aimspy_energy_raw() bind(c, name='aimspy_energy_raw')
++    use physics, only: total_energy
++    implicit none
++
++    aimspy_energy_raw = total_energy
++  end function aimspy_energy_raw
++
++  real*8 function aimspy_energy_free() bind(c, name='aimspy_energy_free')
++    use physics, only: total_energy, entropy_correction
++    implicit none
++
++    ! Variational electronic free energy.  Its negative coordinate derivative
++    ! gives the uncleaned total forces, so this is the force-consistent scalar
++    ! to use for conservative machine-learning potentials.
++    aimspy_energy_free = total_energy + 2.0d0 * entropy_correction
++  end function aimspy_energy_free
++
 +  type(c_ptr) function aimspy_forces() bind(c, name='aimspy_forces')
 +    use physics, only: total_forces  ! shape (3, natoms) in fortran
 +    use dimensions, only: use_forces
@@ -285,8 +303,20 @@ index 00000000..9fd1eb1e
 +
 +  end function aimspy_forces
 +
++  type(c_ptr) function aimspy_stress() bind(c, name='aimspy_stress')
++    use analytical_stress, only: analytical_stress_tensor
++    implicit none
++
++    ! The tensor is the final analytical stress in Hartree/Bohr^3.  Read the
++    ! physical result directly and use AimSpy-owned lifecycle state.
++    if (aimspy_stress_ready) then
++      aimspy_stress = c_loc(analytical_stress_tensor(1, 1))
++    else
++      aimspy_stress = c_null_ptr
++    end if
++  end function aimspy_stress
++
 +end module aimspy_api_bank
-\ No newline at end of file
 diff --git a/src/aimspy_api/callback.f90 b/src/aimspy_api/callback.f90
 new file mode 100644
 index 00000000..8b9d02f6
@@ -1340,6 +1370,148 @@ index 00000000..53c3d69c
 +  end subroutine aimspy_export_grid_data_finalize
 +
 +end module aimspy_export_grid_data
+diff --git a/src/aimspy_api/free_atom_reference.f90 b/src/aimspy_api/free_atom_reference.f90
+new file mode 100644
+index 00000000..dc89f3d1
+--- /dev/null
++++ b/src/aimspy_api/free_atom_reference.f90
+@@ -0,0 +1,136 @@
++! Free-atom reference energies exported by AimsPy.
++!
++! The reference for each species is the total energy of the radial atomic
++! problem that FHI-aims already solves while constructing free-atom data.
++! No additional FHI-aims calculation is launched here.
++module aimspy_free_atom_reference
++
++  use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
++  use, intrinsic :: iso_c_binding, only: c_double, c_loc, c_null_ptr, c_ptr
++
++  implicit none
++  private
++
++  real(c_double), allocatable, target, save :: reference_energy_buf(:)
++  logical, allocatable, save :: reference_energy_valid(:)
++
++  public :: aimspy_compute_sratom_total_energy
++  public :: aimspy_free_atom_reference_energies
++  public :: aimspy_free_atom_reference_finalize
++  public :: aimspy_free_atom_reference_reset
++  public :: aimspy_store_free_atom_reference
++
++contains
++
++  subroutine aimspy_free_atom_reference_reset(n_species)
++    integer, intent(in) :: n_species
++
++    call aimspy_free_atom_reference_finalize()
++    if (n_species <= 0) return
++
++    allocate(reference_energy_buf(n_species))
++    allocate(reference_energy_valid(n_species))
++    reference_energy_buf = 0.0_c_double
++    reference_energy_valid = .false.
++  end subroutine aimspy_free_atom_reference_reset
++
++
++  subroutine aimspy_free_atom_reference_finalize()
++    if (allocated(reference_energy_buf)) deallocate(reference_energy_buf)
++    if (allocated(reference_energy_valid)) deallocate(reference_energy_valid)
++  end subroutine aimspy_free_atom_reference_finalize
++
++
++  subroutine aimspy_store_free_atom_reference(i_species, energy, valid)
++    integer, intent(in) :: i_species
++    real*8, intent(in) :: energy
++    logical, intent(in) :: valid
++
++    if (.not. allocated(reference_energy_buf)) return
++    if (i_species < 1 .or. i_species > size(reference_energy_buf)) return
++
++    reference_energy_buf(i_species) = real(energy, c_double)
++    reference_energy_valid(i_species) = valid .and. ieee_is_finite(energy)
++  end subroutine aimspy_store_free_atom_reference
++
++
++  type(c_ptr) function aimspy_free_atom_reference_energies() &
++      bind(C, name='aimspy_free_atom_reference_energies')
++    if (allocated(reference_energy_buf) .and. &
++        allocated(reference_energy_valid)) then
++      if (size(reference_energy_buf) > 0 .and. &
++          all(reference_energy_valid)) then
++        aimspy_free_atom_reference_energies = c_loc(reference_energy_buf(1))
++        return
++      end if
++    end if
++
++    aimspy_free_atom_reference_energies = c_null_ptr
++  end function aimspy_free_atom_reference_energies
++
++
++  subroutine aimspy_compute_sratom_total_energy( &
++      n_grid, n_shells, i_exch, t_sic, t_kli, t_mgga, radial_grid, &
++      occupations, eigenvalues, density, density_deriv, density_2nd_deriv, &
++      energy, valid)
++    integer, intent(in) :: n_grid, n_shells, i_exch
++    logical, intent(in) :: t_sic, t_kli, t_mgga
++    real*8, intent(in) :: radial_grid(n_grid)
++    real*8, intent(in) :: occupations(n_shells), eigenvalues(n_shells)
++    real*8, intent(in) :: density(n_grid)
++    real*8, intent(in) :: density_deriv(n_grid)
++    real*8, intent(in) :: density_2nd_deriv(n_grid)
++    real*8, intent(out) :: energy
++    logical, intent(out) :: valid
++
++    integer :: i_exch_work
++    real*8 :: electron_count, twice_hartree_energy
++    real*8 :: xc_potential_energy, exchange_energy, correlation_energy
++    real*8 :: hartree_potential(n_grid), xc_potential(n_grid)
++
++    external :: vestat, vexcor
++
++    energy = 0.0d0
++    valid = .false.
++
++    ! These branches require additional, solver-specific energy terms.  The
++    ! normal spinless sratom path used by get_free_atoms has all three false.
++    if (t_sic .or. t_kli .or. t_mgga) return
++
++    i_exch_work = abs(i_exch)
++
++    ! vexlibxc currently does not provide initialized integrated energy terms
++    ! when its energy flag is enabled.  Fail closed instead of exporting a
++    ! plausible-looking but undefined reference energy.
++    if (i_exch_work == 100) return
++
++    electron_count = sum(occupations)
++
++    ! With zion equal to the electron count, vestat returns the Hartree-only
++    ! potential.  Its energy output is int rho(r) * V_H(r) dr = 2 E_H.
++    call vestat( &
++      n_grid, electron_count, twice_hartree_energy, radial_grid, density, &
++      hartree_potential, .true.)
++
++    ! Re-evaluate only the integrated XC components on the converged density.
++    ! Scratch output arrays are used so none of sratom's exported state changes.
++    call vexcor( &
++      i_exch_work, n_grid, radial_grid, density, density_deriv, &
++      density_2nd_deriv, xc_potential, xc_potential_energy, &
++      exchange_energy, correlation_energy, .true.)
++
++    ! The eigenvalue sum contains V_ext + V_cut + V_H + v_xc.  Remove the
++    ! Hartree and XC double counting to obtain the complete radial-atom total
++    ! energy, including any configured confinement potential.
++    energy = dot_product(occupations, eigenvalues) &
++      - 0.5d0 * twice_hartree_energy &
++      + exchange_energy + correlation_energy - xc_potential_energy
++
++    valid = ieee_is_finite(energy) .and. &
++      ieee_is_finite(twice_hartree_energy) .and. &
++      ieee_is_finite(xc_potential_energy) .and. &
++      ieee_is_finite(exchange_energy) .and. &
++      ieee_is_finite(correlation_energy)
++  end subroutine aimspy_compute_sratom_total_energy
++
++end module aimspy_free_atom_reference
 diff --git a/src/aimspy_api/info.f90 b/src/aimspy_api/info.f90
 new file mode 100644
 index 00000000..59c44dd4
@@ -1679,10 +1851,10 @@ index 00000000..59c44dd4
 +end module aimspy_info
 diff --git a/src/aimspy_api/main.f90 b/src/aimspy_api/main.f90
 new file mode 100644
-index 00000000..6c9cd517
+index 00000000..63c9d9c8
 --- /dev/null
 +++ b/src/aimspy_api/main.f90
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,127 @@
 +module aimspy_main
 +
 +    use iso_c_binding
@@ -1701,7 +1873,10 @@ index 00000000..6c9cd517
 +contains
 +
 +    subroutine aimspy_init(c_mpi_comm_input, c_out_filename)  bind(c, name="aimspy_init")
-+        use aimspy_api_bank, only: aimspy_initialized, c_f_string
++        use aimspy_api_bank, only: aimspy_initialized, aimspy_converged_scf, &
++            aimspy_stress_ready, c_f_string
++        use aimspy_free_atom_reference, only: &
++            aimspy_free_atom_reference_finalize
 +        implicit none
 +
 +        integer(c_int), value, intent(in) :: c_mpi_comm_input
@@ -1727,6 +1902,11 @@ index 00000000..6c9cd517
 +        end if
 +
 +        aimspy_initialized = .True.
++        aimspy_converged_scf = .False.
++        aimspy_stress_ready = .False.
++
++        ! Never expose reference energies left by an earlier Calculator.
++        call aimspy_free_atom_reference_finalize()
 +
 +        call aims_initialize(aimspy_mpi_comm, aimspy_filehandle, aimspy_mpi_switch)
 +
@@ -1734,7 +1914,9 @@ index 00000000..6c9cd517
 +
 +
 +    subroutine aimspy_run()  bind(c, name="aimspy_run")
-+        use aimspy_api_bank, only: aimspy_converged_scf, c_hamiltonian, c_overlap
++        use aimspy_api_bank, only: aimspy_converged_scf, aimspy_stress_ready, &
++            c_hamiltonian, c_overlap
++        use runtime_choices, only: use_analytical_stress
 +        implicit none
 +
 +        if (allocated(c_hamiltonian)) then
@@ -1745,19 +1927,26 @@ index 00000000..6c9cd517
 +            deallocate(c_overlap)
 +        end if
 +
++        aimspy_converged_scf = .False.
++        aimspy_stress_ready = .False.
 +        call aims_run(aimspy_converged_scf)
++        aimspy_stress_ready = aimspy_converged_scf .and. use_analytical_stress
 +    
 +    end subroutine aimspy_run
 +
 +    subroutine aimspy_finalize()  bind(c, name="aimspy_finalize")
-+        use aimspy_api_bank, only: aimspy_converged_scf, aimspy_callback_hd
++        use aimspy_api_bank, only: aimspy_converged_scf, aimspy_stress_ready, &
++            aimspy_callback_hd
 +        use aimspy_export_grid_data, only: aimspy_export_grid_data_finalize
 +        use aimspy_export_basis_data, only: aimspy_export_basis_data_finalize
++        use aimspy_free_atom_reference, only: &
++            aimspy_free_atom_reference_finalize
 +        implicit none
 +
 +        integer :: myerr
 +
 +        call aims_finalize(aimspy_converged_scf)
++        aimspy_stress_ready = .False.
 +
 +        ! Release the logfile unit (rank 0 opened it in aimspy_init;
 +        ! nothing else closes it).  iostat swallows the not-connected case.
@@ -1769,6 +1958,9 @@ index 00000000..6c9cd517
 +
 +        ! Deallocate basis-export buffers (spline coefficients / grid params).
 +        call aimspy_export_basis_data_finalize()
++
++        ! Invalidate the C pointer and release the tiny per-species buffer.
++        call aimspy_free_atom_reference_finalize()
 +
 +        ! Reset all callback funptrs / flags so a second Calculator in the
 +        ! same process never calls a dangling Python function pointer left
@@ -1790,7 +1982,6 @@ index 00000000..6c9cd517
 +    end subroutine aimspy_all
 +
 +end module aimspy_main
-\ No newline at end of file
 diff --git a/src/aimspy_api/register.f90 b/src/aimspy_api/register.f90
 new file mode 100644
 index 00000000..3facde26
@@ -1896,6 +2087,199 @@ index 00000000..3facde26
 +    end subroutine aimspy_reset_callbacks
 +
 +end module aimspy_callback_register
+diff --git a/src/basis_sets/atom_sphere_wrapper.f90 b/src/basis_sets/atom_sphere_wrapper.f90
+index 36c8446c..64a90614 100644
+--- a/src/basis_sets/atom_sphere_wrapper.f90
++++ b/src/basis_sets/atom_sphere_wrapper.f90
+@@ -7,7 +7,7 @@ subroutine atom_sphere_wrapper(n_grid, r_grid, species_name, flag_xc, hybrid_coe
+      cut_atom, cutoff_type, r_cut, scale_cutoff, w_cutoff, &
+      use_finite_nuclear_potential, finite_nuc_pot,&
+      eigenval, wave, wave_deriv, density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es, &
+-     kinetic, psi_at_0)
++     kinetic, psi_at_0, atomic_total_energy)
+ !*  SYNOPSIS
+ !*    call atom_sphere_wrapper(...)
+ !*  FUNCTION
+@@ -54,6 +54,7 @@ subroutine atom_sphere_wrapper(n_grid, r_grid, species_name, flag_xc, hybrid_coe
+ !*    o atom_pot_es
+ !*    o kinetic
+ !*    o psi_at_0
++!*    o atomic_total_energy
+ !*  AUTHORS
+ !*    William Huhn
+ !*  NOTES
+@@ -133,6 +134,7 @@ subroutine atom_sphere_wrapper(n_grid, r_grid, species_name, flag_xc, hybrid_coe
+  ! I refuse to give the electrostatic and Hartree potentials an l-channel/spin
+  ! dependence, even though the main code does.
+  real*8, intent(out), dimension(n_max_grid) :: atom_pot_es
++ real*8, intent(out) :: atomic_total_energy
+   !!!!!!!!!!!!!!!!!!!!!!!!
+   ! VARIABLES I'VE ADDED !
+   !!!!!!!!!!!!!!!!!!!!!!!!
+@@ -300,7 +302,6 @@ subroutine atom_sphere_wrapper(n_grid, r_grid, species_name, flag_xc, hybrid_coe
+   real*8, allocatable :: wrky(:,:)  !Work array
+   real*8 :: adiis(idsx+1,idsx+1,3),ipiv(idsx+1),rdiis(idsx+1) ! work arrays for DIIS
+   real*8, allocatable :: ppois(:,:,:)  !auxiliary array for solving Poisson's equation
+-  real*8 :: etotal
+   real*8, allocatable :: psid(:,:,:,:,:)   !WF history  used uniquely in the WF optimization part
+   real*8 :: time(5)
+ 
+@@ -955,13 +956,13 @@ subroutine atom_sphere_wrapper(n_grid, r_grid, species_name, flag_xc, hybrid_coe
+     call zorasolver(nameat,nprinx,nprin,nrad,lmaxp,lmax,norb,norbmax,idsx,nspin,nspol,occup,eval,chrg, &
+        residue,ekin_orb,epot_orb,noae,no,il,lo,zo,so,ncovmax,ncov,potloc,pothart,potxc,pothf,pot0,ccleb,grad,&
+        gradp,grads,gradhf,hhp,ssp,epslag,shift,rcov,rprb,znuc,psi,psid,as_kinetic,rr,rw,rr4,rw4,screened,&
+-       omega,hfmix,rhotot,rhoud,rhoij,screenexkernel,ppois,wrky,adiis,etotal,epstres_all,pspcalcul,kinonly,time,&
++       omega,hfmix,rhotot,rhoud,rhoij,screenexkernel,ppois,wrky,adiis,atomic_total_energy,epstres_all,pspcalcul,kinonly,time,&
+        cut_atom,cutoff_type,r_cut,scale_cutoff,w_cutoff, use_finite_nuclear_potential, finite_nuc_pot_atomsphere_grid, finite_nuc_pot_atomsphere_grid4)
+   else
+     call atomsolver(nameat,nprinx,nprin,nrad,lmaxp,lmax,norb,norbmax,idsx,nspin,nspol,occup,eval,chrg, &
+        residue,ekin_orb,epot_orb,noae,no,il,lo,zo,so,ncovmax,ncov,potloc,pothart,potxc,pothf,pot0,ccleb,grad,&
+        gradp,grads,gradhf,hhp,ssp,epslag,shift,rcov,rprb,znuc,psi,psid,as_kinetic,rr,rw,rr4,rw4,screened,&
+-       omega,hfmix,rhotot,rhoud,rhoij,screenexkernel,ppois,wrky,adiis,etotal,epstres,pspcalcul,kinonly,time,&
++       omega,hfmix,rhotot,rhoud,rhoij,screenexkernel,ppois,wrky,adiis,atomic_total_energy,epstres,pspcalcul,kinonly,time,&
+        cut_atom,cutoff_type,r_cut,scale_cutoff,w_cutoff,use_finite_nuclear_potential, finite_nuc_pot_atomsphere_grid)
+   endif
+  
+diff --git a/src/basis_sets/get_free_atoms.f90 b/src/basis_sets/get_free_atoms.f90
+index 89f1e6ab..f539ee56 100644
+--- a/src/basis_sets/get_free_atoms.f90
++++ b/src/basis_sets/get_free_atoms.f90
+@@ -43,11 +43,16 @@
+                                   free_kinetic_spl, free_wave_deriv_spl
+       use localorb_io,     only : OL_norm, use_unit, localorb_info
+       use synchronize_mpi, only : sync_atomic_solver_outputs
+-      use mpi_tasks,       only : aims_stop, aims_stop_coll, check_allocation
++      use synchronize_mpi_basic, only : bcast_logical, bcast_real
++      use mpi_tasks,       only : aims_stop, aims_stop_coll, check_allocation, myid
+       use psi_at_nucleus_mod, only: psi_at_nucleus_atomic
+       use libxc_interface, only: change_spin_of_libxc_functls
+       use sratom_init_utilities
+       use xc_library, only: xc__hf, get_atomic_solver_xc_name
++      use aimspy_free_atom_reference, only: &
++        aimspy_compute_sratom_total_energy, &
++        aimspy_free_atom_reference_reset, &
++        aimspy_store_free_atom_reference
+ 
+       implicit none
+ !  ARGUMENTS
+@@ -164,6 +169,8 @@
+       real*8, dimension(:,:), allocatable :: small_wave
+ 
+       real*8 :: outermost_charge
++      real*8 :: atomic_total_energy
++      logical :: atomic_total_energy_valid
+ 
+       logical t_in_pot
+       logical t_sic
+@@ -375,6 +382,8 @@
+        endif
+       endif
+ 
++      call aimspy_free_atom_reference_reset(n_species)
++
+ 
+ !  initialize grids
+ !  initialize also the core density parts, currently unused.
+@@ -404,6 +413,9 @@
+ 
+       do i_species = 1,n_species,1
+ 
++        atomic_total_energy = 0.0d0
++        atomic_total_energy_valid = .false.
++
+         write(info_str,'(2X,A,A)') "Species: ", species_name(i_species)
+         call localorb_info('',use_unit)
+         call localorb_info(info_str,use_unit,'(A)')
+@@ -544,6 +556,17 @@
+                  svm, t_mgga, wave_deriv, core_type, &
+                  use_finite_nuclear_potential, finite_nuc_pot&
+                  )
++
++               if (myid == 0) then
++                 call aimspy_compute_sratom_total_energy( &
++                   n_grid(i_species), n_valence, i_exch, &
++                   t_sic, t_kli, t_mgga, r_grid(1:n_grid(i_species),i_species), &
++                   occ_shell(1:n_valence), eigenval(1:n_valence), &
++                   density(1:n_grid(i_species),1), &
++                   density_deriv(1:n_grid(i_species),1), &
++                   density_2nd_deriv(1:n_grid(i_species),1), &
++                   atomic_total_energy, atomic_total_energy_valid)
++               end if
+              else if (atomic_solver .eq. ATOMIC_SOLVER_ATOM_SPHERE) then
+                ! atom_sphere_wrapper's argument list has been deliberately constructed to be an example of a generic
+                ! interface between aims and a radial atomic solver
+@@ -560,7 +583,9 @@
+                           w_cutoff(i_species), & ! Cutoff potential
+                  use_finite_nuclear_potential, finite_nuc_pot,&
+                  eigenval, wave, wave_deriv, density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es, &
+-                 kinetic, psi_at_nucleus_atomic(:n_valence,i_species)) ! Output
++                 kinetic, psi_at_nucleus_atomic(:n_valence,i_species), &
++                 atomic_total_energy) ! Output
++               atomic_total_energy_valid = .true.
+                call sync_atomic_solver_outputs( n_max_ind_fns, n_max_grid, n_channels, 1, &
+                     eigenval, wave, wave_deriv, kinetic, &
+                     density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es, psi_at_nucleus_atomic(:n_valence,i_species))
+@@ -569,6 +594,14 @@
+             end if
+         end if
+ 
++        ! Keep one authoritative value on every rank.  This is especially
++        ! important for atom_sphere, whose unoccupied-state initialization may
++        ! differ between ranks before its normal output synchronization.
++        call bcast_logical(atomic_total_energy_valid, 0)
++        call bcast_real(atomic_total_energy, 0)
++        call aimspy_store_free_atom_reference( &
++          i_species, atomic_total_energy, atomic_total_energy_valid)
++
+ 
+ !       now copy all data from atom onto storage arrays
+ 
+diff --git a/src/basis_sets/get_free_atoms_polarized.f90 b/src/basis_sets/get_free_atoms_polarized.f90
+index b8d0171d..e3a21405 100644
+--- a/src/basis_sets/get_free_atoms_polarized.f90
++++ b/src/basis_sets/get_free_atoms_polarized.f90
+@@ -115,6 +115,7 @@ subroutine get_free_atoms_polarized(  )
+   logical t_core
+ 
+   real*8 nuclear_charge
++  real*8 unused_atomic_total_energy
+ 
+   real*8 :: al, tau, tau_now
+ 
+@@ -479,7 +480,9 @@ subroutine get_free_atoms_polarized(  )
+                           w_cutoff(comp_species), & ! Cutoff potential
+                   use_finite_nuclear_potential, finite_nuc_pot,&
+                  eigenval, wave, wave_deriv, density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es, &
+-                 kinetic, psi_at_nucleus_atomic(:n_atomic(comp_species),comp_species)) ! Output
++                 kinetic, &
++                 psi_at_nucleus_atomic(:n_atomic(comp_species),comp_species), &
++                 unused_atomic_total_energy) ! Output
+           call sync_atomic_solver_outputs( n_max_ind_fns_pol, n_max_grid, n_channels, n_spin, &
+                eigenval, wave, wave_deriv, kinetic, &
+                density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es, &
+diff --git a/src/basis_sets/get_free_ion.f90 b/src/basis_sets/get_free_ion.f90
+index 48b946ae..95f41f16 100644
+--- a/src/basis_sets/get_free_ion.f90
++++ b/src/basis_sets/get_free_ion.f90
+@@ -125,6 +125,7 @@
+ 
+    integer :: i_exch
+    real*8 nuclear_charge
++   real*8 unused_atomic_total_energy
+    integer i_rel
+    integer i_grad
+    integer sc_max_iter
+@@ -390,7 +391,9 @@
+               w_cutoff(i_species), & ! Cutoff potential
+          use_finite_nuclear_potential, finite_nuc_pot,&
+          free_ion_eigenval, free_ion_wave, free_ion_wave_deriv, density, density_deriv, density_2nd_deriv, &
+-         atom_pot, atom_pot_es, free_ion_kinetic, psi_at_nucleus_ionic(:n_valence,i_species)) ! Output
++         atom_pot, atom_pot_es, free_ion_kinetic, &
++         psi_at_nucleus_ionic(:n_valence,i_species), &
++         unused_atomic_total_energy) ! Output
+      call sync_atomic_solver_outputs( n_max_ind_fns, n_max_grid, n_channels, 1, &
+           free_ion_eigenval, free_ion_wave, free_ion_wave_deriv, free_ion_kinetic, &
+           density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es )
 diff --git a/src/electric_response/electric_response.f90 b/src/electric_response/electric_response.f90
 index 40dc3eb6..292b9fd0 100644
 --- a/src/electric_response/electric_response.f90
@@ -1968,6 +2352,60 @@ index 0ea4d128..0f4eb0dc 100644
    end if
  
  end subroutine
+diff --git a/src/get_lda_free_atom_densities.f90 b/src/get_lda_free_atom_densities.f90
+index e167ade0..279f957d 100644
+--- a/src/get_lda_free_atom_densities.f90
++++ b/src/get_lda_free_atom_densities.f90
+@@ -142,6 +142,7 @@
+       real*8, dimension(:,:), allocatable :: wave_deriv
+ 
+       real*8 :: outermost_charge
++      real*8 :: unused_atomic_total_energy
+ 
+       logical t_in_pot 
+       logical t_sic
+@@ -401,7 +402,8 @@
+                  w_cutoff(i_species), & ! Cutoff potential
+             use_finite_nuclear_potential, finite_nuc_pot,&
+             eigenval, wave, wave_deriv, density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es, &
+-            kinetic, psi_at_nucleus_atomic(:n_valence,i_species)) ! Output
++            kinetic, psi_at_nucleus_atomic(:n_valence,i_species), &
++            unused_atomic_total_energy) ! Output
+           call sync_atomic_solver_outputs( n_max_ind_fns, n_max_grid, n_channels, 1, &
+                eigenval, wave, wave_deriv, kinetic, &
+                density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es )
+diff --git a/src/hirshfeld_analysis_iterative.f90 b/src/hirshfeld_analysis_iterative.f90
+index bd3b4fdf..f38ebad4 100644
+--- a/src/hirshfeld_analysis_iterative.f90
++++ b/src/hirshfeld_analysis_iterative.f90
+@@ -606,6 +606,7 @@ subroutine get_ion_hirsh &
+       real*8 cut_free_atom_fixed
+ 
+       real*8 nuclear_charge
++      real*8 unused_atomic_total_energy
+       real*8 ::  dr_coef, alpha
+       real*8 ::  residual_charge
+ 
+@@ -1088,7 +1089,8 @@ subroutine get_ion_hirsh &
+                  w_cutoff(i_species), & ! Cutoff potential
+             use_finite_nuclear_potential, finite_nuc_pot,&
+             eigenval, wave, wave_deriv, density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es, &
+-            kinetic, psi_at_nucleus_atomic(:n_valence,i_species)) ! Output
++            kinetic, psi_at_nucleus_atomic(:n_valence,i_species), &
++            unused_atomic_total_energy) ! Output
+           call sync_atomic_solver_outputs( n_max_ind_fns1, n_max_grid, n_channels, n_spin_1, &
+                eigenval, wave, wave_deriv, kinetic, &
+                density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es )
+@@ -1259,7 +1261,8 @@ subroutine get_ion_hirsh &
+                  w_cutoff(i_species), & ! Cutoff potential
+             use_finite_nuclear_potential, finite_nuc_pot,&
+             eigenval, wave, wave_deriv, density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es, &
+-            kinetic, psi_at_nucleus_atomic(:n_valence,i_species)) ! Output
++            kinetic, psi_at_nucleus_atomic(:n_valence,i_species), &
++            unused_atomic_total_energy) ! Output
+           call sync_atomic_solver_outputs( n_max_ind_fns, n_max_grid, n_channels, n_spin_1, &
+                eigenval, wave, wave_deriv, kinetic, &
+                density, density_deriv, density_2nd_deriv, atom_pot, atom_pot_es )
 diff --git a/src/initialize_scf.f90 b/src/initialize_scf.f90
 index 7a51c788..18637a26 100644
 --- a/src/initialize_scf.f90

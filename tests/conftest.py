@@ -23,4 +23,5 @@ collect_ignore = [
     "test_memory_loop.py",
     "test_basis_export.py",
     "test_basis_callback_paths.py",
+    "test_observables.py",
 ]

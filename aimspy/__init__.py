@@ -67,6 +67,7 @@ from .matrix import (
     get_rs_hamiltonian,
     get_rs_overlap,
     get_forces,
+    get_stress,
 )
 from .info import load_info
 from ._exceptions import (
@@ -101,6 +102,7 @@ __all__ = [
     "get_rs_hamiltonian",
     "get_rs_overlap",
     "get_forces",
+    "get_stress",
     "GridData",
     "viz",
     "HARTREE_TO_EV",

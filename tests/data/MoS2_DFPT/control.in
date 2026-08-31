@@ -42,7 +42,7 @@ dfpt_mixer                         pulay
     basis_dep_cutoff    1e-4
 #
     radial_base         59 5.0
-    radial_multiplier   1
+    radial_multiplier   2
     angular_grids specified
       division   0.4847   50
       division   0.9168  110

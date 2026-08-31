@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import h5py
 import numpy as np
 import pytest
 
-from aimspy import DeepHData
+from aimspy import AimspyConfigError, DeepHData
 from aimspy.interface.deeph.data import (
     _build_elements_orbital_map,
     _compute_n_basis,
@@ -41,6 +42,9 @@ def _make_simple_blocks():
         (0, 0, 0, 0, 0): np.array([[1.0]]),  # Mo-Mo R=0
         (0, 0, 0, 0, 1): np.array([[0.5]]),  # Mo-S R=0
     }
+
+
+_SIMPLE_EOM = {"Mo": [0], "S": [0]}
 
 
 # =============================================================================
@@ -200,7 +204,7 @@ class TestSaveLoad:
             lattice=np.eye(3) * 10.0,
             atom_symbols=["Mo", "S", "S"],
             atom_coords=np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]]),
-            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            elements_orbital_map=_SIMPLE_EOM,
             hamiltonian_blocks=blocks,
             path=tmp_path,
         )
@@ -287,6 +291,35 @@ class TestToAimspy:
 # Tests: error cases
 # =============================================================================
 class TestErrors:
+    def test_direct_constructor_preserves_legacy_positional_metadata_order(
+        self, tmp_path
+    ):
+        dd = DeepHData(
+            np.eye(3),
+            ["H"],
+            np.zeros((1, 3)),
+            {"H": [0]},
+            1,
+            np.array([[0, 0, 0, 0, 0]], dtype=np.int32),
+            np.array([0, 1], dtype=np.int32),
+            np.array([[1, 1]], dtype=np.int32),
+            np.array([1.0]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            -2.5,
+            4.75,
+            tmp_path,
+        )
+
+        assert dd.energy_eV == pytest.approx(-2.5)
+        assert dd.fermi_energy_eV == pytest.approx(4.75)
+        assert dd.path == tmp_path
+        assert dd.stress is None
+
     def test_require_path_raises_config_error(self):
         from aimspy import AimspyConfigError
 
@@ -336,7 +369,7 @@ class TestHelpers:
 
 
 # =============================================================================
-# Tests: force / energy (MD-style force.h5)
+# Tests: energy / force / stress (MD-style force.h5)
 # =============================================================================
 def _make_mock_structure_unsorted():
     """3-atom MoS2-like structure with NON-identity permutation.
@@ -359,19 +392,33 @@ def _make_mock_structure_unsorted():
     )
 
 
+def _make_force_data(path=None, **labels):
+    return DeepHData.from_memory(
+        lattice=np.eye(3) * 10.0,
+        atom_symbols=["Mo", "S", "S"],
+        atom_coords=np.zeros((3, 3)),
+        elements_orbital_map=_SIMPLE_EOM,
+        hamiltonian_blocks=_make_simple_blocks(),
+        path=path,
+        **labels,
+    )
+
+
 class TestForce:
     def test_save_load_force_roundtrip(self, tmp_path):
-        """save → from_directory roundtrip: force + energy preserved."""
+        """save → from_directory preserves all force-field labels."""
         force = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+        stress = np.array([[1.0, 0.4, 0.5], [0.4, 2.0, 0.6], [0.5, 0.6, 3.0]])
         dd = DeepHData.from_memory(
             lattice=np.eye(3) * 10.0,
             atom_symbols=["Mo", "S", "S"],
             atom_coords=np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]]),
-            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            elements_orbital_map=_SIMPLE_EOM,
             hamiltonian_blocks=_make_simple_blocks(),
             force=force,
             energy_eV=-123.45,
             path=tmp_path,
+            stress=stress,
         )
         dd.save()
         assert (tmp_path / "force.h5").exists()
@@ -380,6 +427,7 @@ class TestForce:
         assert dd2.force is not None
         np.testing.assert_allclose(dd2.force, force)
         assert dd2.energy_eV == pytest.approx(-123.45)
+        np.testing.assert_allclose(dd2.stress, stress)
 
     def test_from_aimspy_with_force_reorder(self):
         """from_aimspy reorders force from aims → POSCAR order."""
@@ -396,12 +444,17 @@ class TestForce:
             hamiltonian=AimspyMatrix(blocks=blocks, n_spin=1),
             force=force_aims,
             energy=-1.0,  # Hartree
+            stress=np.diag([1.0, 2.0, 3.0]),
         )
         # POSCAR order is [Mo, S, S], so force should be [2, 1, 3]
         assert dd.force is not None
         np.testing.assert_allclose(dd.force[:, 0], [2.0, 1.0, 3.0])
+        # Structure quantities are already in Å and must not be rescaled.
+        np.testing.assert_array_equal(dd.lattice, struct.lattice)
+        np.testing.assert_array_equal(dd.atom_coords, struct.atom_coords[[1, 0, 2]])
         # energy: -1.0 Hartree → eV
         assert dd.energy_eV == pytest.approx(-1.0 * 27.2113845)
+        np.testing.assert_allclose(dd.stress, np.diag([1.0, 2.0, 3.0]))
 
     def test_set_force_with_energy(self):
         """set_force reorders + converts energy Hartree→eV."""
@@ -441,11 +494,11 @@ class TestForce:
             lattice=np.eye(3) * 10.0,
             atom_symbols=["Mo", "S", "S"],
             atom_coords=np.zeros((3, 3)),
-            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            elements_orbital_map=_SIMPLE_EOM,
             hamiltonian_blocks=_make_simple_blocks(),
             path=tmp_path,
         )
-        with pytest.raises(AimspyConfigError, match="No force"):
+        with pytest.raises(AimspyConfigError, match="No energy, force, or stress"):
             dd.save_force()
 
     def test_force_h5_format_matches_example(self, tmp_path):
@@ -464,6 +517,7 @@ class TestForce:
             force=force,
             energy_eV=-0.073,
             path=tmp_path,
+            stress=np.array([[1.0, 0.6, 0.5], [0.6, 2.0, 0.4], [0.5, 0.4, 3.0]]),
         )
         dd.save_force()
 
@@ -478,22 +532,22 @@ class TestForce:
             assert f["force"].dtype == np.float64
             assert f["stress"].shape == (6,)
             assert f["stress"].dtype == np.float64
-            np.testing.assert_allclose(f["stress"][:], np.zeros(6))
+            np.testing.assert_allclose(f["stress"][:], [1, 2, 3, 0.4, 0.5, 0.6])
             # Attrs
             assert f.attrs["formula"] == b"X12"
             assert int(f.attrs["natoms"]) == 12
             # Energy value
             assert float(f["energy"][()]) == pytest.approx(-0.073)
 
-    def test_force_h5_energy_defaults_to_zero(self, tmp_path):
-        """When energy_eV is None, force.h5 energy dataset is 0.0."""
+    def test_force_h5_uses_zero_stress_when_unavailable(self, tmp_path):
+        """Missing energy is omitted while unavailable stress is six zeros."""
         import h5py
 
         dd = DeepHData.from_memory(
             lattice=np.eye(3) * 10.0,
             atom_symbols=["Mo", "S", "S"],
             atom_coords=np.zeros((3, 3)),
-            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            elements_orbital_map=_SIMPLE_EOM,
             hamiltonian_blocks=_make_simple_blocks(),
             force=np.ones((3, 3)),
             energy_eV=None,
@@ -501,7 +555,9 @@ class TestForce:
         )
         dd.save_force()
         with h5py.File(tmp_path / "force.h5", "r") as f:
-            assert float(f["energy"][()]) == 0.0
+            assert set(f.keys()) == {"cell", "force", "stress"}
+            assert f["stress"].shape == (6,)
+            np.testing.assert_array_equal(f["stress"][:], np.zeros(6))
 
     def test_from_directory_force_shape_mismatch(self, tmp_path):
         """force.h5 with wrong atom count raises AimspyConfigError."""
@@ -514,7 +570,7 @@ class TestForce:
             lattice=np.eye(3) * 10.0,
             atom_symbols=["Mo", "S", "S"],
             atom_coords=np.zeros((3, 3)),
-            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            elements_orbital_map=_SIMPLE_EOM,
             hamiltonian_blocks=_make_simple_blocks(),
             path=tmp_path,
         )
@@ -529,7 +585,7 @@ class TestForce:
             f.attrs["formula"] = b"X4"
             f.attrs["natoms"] = np.int64(4)
 
-        with pytest.raises(AimspyConfigError, match="force.h5: force shape"):
+        with pytest.raises(AimspyConfigError, match="force.h5: force: expected shape"):
             DeepHData.from_directory(tmp_path)
 
     def test_from_directory_force_wrong_columns(self, tmp_path):
@@ -542,7 +598,7 @@ class TestForce:
             lattice=np.eye(3) * 10.0,
             atom_symbols=["Mo", "S", "S"],
             atom_coords=np.zeros((3, 3)),
-            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            elements_orbital_map=_SIMPLE_EOM,
             hamiltonian_blocks=_make_simple_blocks(),
             path=tmp_path,
         )
@@ -557,14 +613,14 @@ class TestForce:
             f.attrs["formula"] = b"X3"
             f.attrs["natoms"] = np.int64(3)
 
-        with pytest.raises(AimspyConfigError, match="force.h5: force shape"):
+        with pytest.raises(AimspyConfigError, match="force.h5: force: expected shape"):
             DeepHData.from_directory(tmp_path)
 
     def test_from_memory_force_shape_validation(self):
         """from_memory rejects force with wrong shape."""
         from aimspy import AimspyConfigError
 
-        with pytest.raises(AimspyConfigError, match="force shape"):
+        with pytest.raises(AimspyConfigError, match="force: expected shape"):
             DeepHData.from_memory(
                 lattice=np.eye(3) * 10.0,
                 atom_symbols=["Mo", "S", "S"],
@@ -573,6 +629,18 @@ class TestForce:
                 hamiltonian_blocks=_make_simple_blocks(),
                 force=np.zeros((3, 2)),  # wrong: 2 columns
             )
+
+    @pytest.mark.parametrize(
+        "force",
+        [
+            np.full((3, 3), np.nan),
+            np.ones((3, 3), dtype=np.complex128),
+            np.asarray([["x"] * 3] * 3),
+        ],
+    )
+    def test_from_memory_force_value_validation(self, force):
+        with pytest.raises(AimspyConfigError, match="force:"):
+            _make_force_data(force=force)
 
     def test_set_force_shape_validation(self):
         """set_force rejects force with wrong shape."""
@@ -583,7 +651,7 @@ class TestForce:
             structure=struct,
             hamiltonian=AimspyMatrix(blocks=_make_simple_blocks(), n_spin=1),
         )
-        with pytest.raises(AimspyConfigError, match="force shape"):
+        with pytest.raises(AimspyConfigError, match="force: expected shape"):
             dd.set_force(np.zeros((3, 2)), structure=struct)  # wrong: 2 cols
 
     def test_from_aimspy_force_list_input(self):
@@ -616,6 +684,175 @@ class TestForce:
         # POSCAR order [Mo, S, S] → [2, 1, 3]
         np.testing.assert_allclose(dd.force[:, 0], [2.0, 1.0, 3.0])
 
+    def test_stress_voigt_order_and_roundtrip(self, tmp_path):
+        stress = np.array([[11.0, 16.0, 15.0], [16.0, 12.0, 14.0], [15.0, 14.0, 13.0]])
+        dd = _make_force_data(tmp_path, energy_eV=-7.5, stress=stress)
+        dd.save()
+
+        with h5py.File(tmp_path / "force.h5", "r") as f:
+            np.testing.assert_array_equal(
+                f["stress"][:], [11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+            )
+            assert "force" not in f
+
+        loaded = DeepHData.from_directory(tmp_path)
+        assert loaded.force is None
+        assert loaded.energy_eV == pytest.approx(-7.5)
+        np.testing.assert_array_equal(loaded.stress, stress)
+
+    @pytest.mark.parametrize("shape", [(6,), (1, 6), (3, 3)])
+    def test_from_memory_accepts_supported_stress_shapes(self, shape):
+        voigt = np.arange(1.0, 7.0)
+        tensor = np.array([[1.0, 6.0, 5.0], [6.0, 2.0, 4.0], [5.0, 4.0, 3.0]])
+        value = tensor if shape == (3, 3) else voigt.reshape(shape)
+        dd = _make_force_data(stress=value)
+        np.testing.assert_array_equal(dd.stress, tensor)
+
+    @pytest.mark.parametrize(
+        ("stress", "message"),
+        [
+            (np.zeros((3, 2)), "expected shape"),
+            (
+                np.array([[1.0, 2.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+                "symmetric",
+            ),
+            (np.array([1.0, 2.0, 3.0, 4.0, 5.0, np.nan]), "finite"),
+            (np.asarray(["x"] * 6), "numeric dtype"),
+        ],
+    )
+    def test_from_memory_rejects_invalid_stress(self, stress, message):
+        with pytest.raises(AimspyConfigError, match=message):
+            _make_force_data(stress=stress)
+
+    @pytest.mark.parametrize("energy", [np.nan, np.inf, -np.inf])
+    def test_from_memory_rejects_nonfinite_energy(self, energy):
+        with pytest.raises(AimspyConfigError, match="energy: value must be finite"):
+            _make_force_data(energy_eV=energy)
+
+    def test_from_memory_rejects_nonscalar_energy(self):
+        with pytest.raises(AimspyConfigError, match="energy: expected a scalar"):
+            _make_force_data(energy_eV=np.array([-1.0]))
+
+    def test_force_and_energy_only_files_roundtrip(self, tmp_path):
+        force_dir = tmp_path / "force_only"
+        force = np.arange(9.0).reshape(3, 3)
+        _make_force_data(force_dir, force=force).save()
+        force_only = DeepHData.from_directory(force_dir)
+        np.testing.assert_array_equal(force_only.force, force)
+        assert force_only.energy_eV is None
+        np.testing.assert_array_equal(force_only.stress, np.zeros((3, 3)))
+
+        energy_dir = tmp_path / "energy_only"
+        _make_force_data(energy_dir, energy_eV=-2.5).save()
+        energy_only = DeepHData.from_directory(energy_dir)
+        assert energy_only.force is None
+        assert energy_only.energy_eV == pytest.approx(-2.5)
+        np.testing.assert_array_equal(energy_only.stress, np.zeros((3, 3)))
+
+    def test_from_aimspy_none_stress_writes_zero_voigt(self, tmp_path):
+        struct = AimspyStructure(
+            n_atoms=3,
+            n_basis=3,
+            n_spin=1,
+            n_periodic=3,
+            lattice=np.eye(3) * 10.0,
+            atom_symbols=["S", "Mo", "S"],
+            atom_coords=np.zeros((3, 3)),
+            basis_atom=np.arange(3, dtype=np.int32),
+            basis_l=np.zeros(3, dtype=np.int32),
+            basis_m=np.zeros(3, dtype=np.int32),
+        )
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            hamiltonian=AimspyMatrix(blocks=_make_simple_blocks(), n_spin=1),
+            force=np.zeros((3, 3)),
+            energy=-1.0,
+            stress=None,
+            path=tmp_path,
+        )
+
+        assert dd.stress is None
+        dd.save()
+        with h5py.File(tmp_path / "force.h5", "r") as f:
+            np.testing.assert_array_equal(f["stress"][:], np.zeros(6))
+
+    def test_from_directory_accepts_tensor_stress(self, tmp_path):
+        stress = np.array([[1.0, 0.6, 0.5], [0.6, 2.0, 0.4], [0.5, 0.4, 3.0]])
+        dd = _make_force_data(tmp_path)
+        dd.save()
+        with h5py.File(tmp_path / "force.h5", "w") as f:
+            f.create_dataset("cell", data=dd.lattice)
+            f.create_dataset("stress", data=stress)
+        loaded = DeepHData.from_directory(tmp_path)
+        np.testing.assert_array_equal(loaded.stress, stress)
+
+    def test_from_directory_rejects_cell_mismatch(self, tmp_path):
+        dd = _make_force_data(tmp_path)
+        dd.save()
+        with h5py.File(tmp_path / "force.h5", "w") as f:
+            f.create_dataset("cell", data=np.eye(3) * 11.0)
+            f.create_dataset("energy", data=-1.0)
+        with pytest.raises(AimspyConfigError, match="cell: does not match"):
+            DeepHData.from_directory(tmp_path)
+
+    def test_from_directory_rejects_force_file_without_labels(self, tmp_path):
+        dd = _make_force_data(tmp_path)
+        dd.save()
+        with h5py.File(tmp_path / "force.h5", "w") as f:
+            f.create_dataset("cell", data=dd.lattice)
+        with pytest.raises(AimspyConfigError, match="at least one of energy"):
+            DeepHData.from_directory(tmp_path)
+
+    @pytest.mark.parametrize("field", ["cell", "energy", "force", "stress"])
+    def test_force_h5_names_must_refer_to_datasets(self, tmp_path, field):
+        dd = _make_force_data(
+            tmp_path,
+            force=np.zeros((3, 3)),
+            energy_eV=-1.0,
+            stress=np.eye(3),
+        )
+        dd.save()
+        with h5py.File(tmp_path / "force.h5", "a") as h5:
+            del h5[field]
+            h5.create_group(field)
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            DeepHData.from_directory(tmp_path)
+
+        assert f"force.h5: {field}: expected an HDF5 dataset" in str(exc_info.value)
+
+    def test_write_revalidates_mutated_labels(self, tmp_path):
+        dd = _make_force_data(tmp_path, force=np.zeros((3, 3)), stress=np.eye(3))
+        dd.force = np.zeros((2, 3))
+        with pytest.raises(AimspyConfigError, match="force: expected shape"):
+            dd.save_force()
+
+        dd.force = np.zeros((3, 3))
+        dd.stress = np.full((3, 3), np.nan)
+        with pytest.raises(
+            AimspyConfigError, match="stress: values must all be finite"
+        ):
+            dd.save_force()
+
+    def test_set_force_stores_relative_energy_and_stress_units(self):
+        struct = _make_mock_structure_unsorted()
+        dd = DeepHData.from_aimspy(
+            structure=struct,
+            hamiltonian=AimspyMatrix(blocks=_make_simple_blocks(), n_spin=1),
+        )
+        force_eV_per_ang = np.arange(9.0).reshape(3, 3)
+        stress_eV_per_ang3 = np.diag([1.5, 2.5, 3.5])
+        energy_relative_Ha = -10.25
+        dd.set_force(
+            force_eV_per_ang,
+            struct,
+            energy=energy_relative_Ha,
+            stress=stress_eV_per_ang3,
+        )
+        np.testing.assert_array_equal(dd.force, force_eV_per_ang[[1, 0, 2]])
+        assert dd.energy_eV == pytest.approx(energy_relative_Ha * 27.2113845)
+        np.testing.assert_array_equal(dd.stress, stress_eV_per_ang3)
+
     def test_repr_includes_force_tag(self):
         """__repr__ includes '+F' when force is set."""
         dd = DeepHData.from_memory(
@@ -647,7 +884,7 @@ class TestForce:
             lattice=np.eye(3) * 10.0,
             atom_symbols=["Mo", "S", "S"],
             atom_coords=np.zeros((3, 3)),
-            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            elements_orbital_map=_SIMPLE_EOM,
             hamiltonian_blocks=_make_simple_blocks(),
             force=np.ones((3, 3)),
             energy_eV=42.0,
@@ -796,7 +1033,7 @@ class TestFirstOrderSaveLoad:
             lattice=np.eye(3) * 10.0,
             atom_symbols=["Mo", "S", "S"],
             atom_coords=np.zeros((3, 3)),
-            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            elements_orbital_map=_SIMPLE_EOM,
             hamiltonian_blocks=_make_simple_blocks(),
             first_order_hamiltonian_blocks=_make_three_first_order_blocks(),
             path=tmp_path,
@@ -821,7 +1058,7 @@ class TestFirstOrderSaveLoad:
             lattice=np.eye(3) * 10.0,
             atom_symbols=["Mo", "S", "S"],
             atom_coords=np.zeros((3, 3)),
-            elements_orbital_map={"Mo": [0, 0, 1], "S": [0, 0]},
+            elements_orbital_map=_SIMPLE_EOM,
             hamiltonian_blocks=_make_simple_blocks(),
             first_order_hamiltonian_blocks=_make_three_first_order_blocks(),
             path=tmp_path,
@@ -1039,8 +1276,8 @@ class TestAtomPairsReorder:
             np.zeros((3, 3)),
         )
         info = {
-            "elements_orbital_map": {"Mo": [0, 0, 1], "S": [0, 0]},
-            "orbits_quantity": 5,
+            "elements_orbital_map": _SIMPLE_EOM,
+            "orbits_quantity": 3,
             "spinful": False,
         }
         with open(path / "info.json", "w") as f:
@@ -1140,6 +1377,333 @@ class TestAtomPairsReorder:
         # And the rebuilt 3x chunk layout matches the canonical pair order
         np.testing.assert_array_equal(dd._fo_chunk_boundaries, [0, 3, 6])
         np.testing.assert_array_equal(dd._fo_chunk_shapes, [[3, 1], [3, 1]])
+
+
+# =============================================================================
+# Strict HDF5 layout validation
+# =============================================================================
+class TestMatrixLayoutValidation:
+    def _write_metadata(self, path):
+        from aimspy.interface.deeph.data import _write_poscar
+
+        _write_poscar(
+            path / "POSCAR",
+            np.eye(3) * 5.0,
+            ["H"],
+            np.zeros((1, 3)),
+        )
+        (path / "info.json").write_text(
+            json.dumps(
+                {
+                    "elements_orbital_map": {"H": [0]},
+                    "orbits_quantity": 1,
+                    "spinful": False,
+                }
+            )
+        )
+
+    def _write_matrix(
+        self,
+        path,
+        filename="hamiltonian.h5",
+        *,
+        atom_pairs=None,
+        chunk_boundaries=None,
+        chunk_shapes=None,
+        entries=None,
+    ):
+        import h5py
+
+        arrays = {
+            "atom_pairs": np.array([[0, 0, 0, 0, 0]], dtype=np.int32),
+            "chunk_boundaries": np.array([0, 1], dtype=np.int32),
+            "chunk_shapes": np.array([[1, 1]], dtype=np.int32),
+            "entries": np.array([1.0], dtype=np.float64),
+        }
+        replacements = {
+            "atom_pairs": atom_pairs,
+            "chunk_boundaries": chunk_boundaries,
+            "chunk_shapes": chunk_shapes,
+            "entries": entries,
+        }
+        for name, value in replacements.items():
+            if value is not None:
+                arrays[name] = value
+        with h5py.File(path / filename, "w") as h5:
+            for name, value in arrays.items():
+                h5.create_dataset(name, data=value)
+        return path / filename
+
+    def _make_valid_directory(self, path):
+        self._write_metadata(path)
+        return self._write_matrix(path)
+
+    @pytest.mark.parametrize(
+        "missing",
+        ["atom_pairs", "chunk_boundaries", "chunk_shapes", "entries"],
+    )
+    def test_missing_required_dataset_rejected(self, tmp_path, missing):
+        import h5py
+
+        matrix_path = self._make_valid_directory(tmp_path)
+        with h5py.File(matrix_path, "a") as h5:
+            del h5[missing]
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            DeepHData.from_directory(tmp_path)
+
+        assert f"hamiltonian.h5: {missing}:" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "field", ["atom_pairs", "chunk_boundaries", "chunk_shapes", "entries"]
+    )
+    def test_required_names_must_refer_to_datasets(self, tmp_path, field):
+        import h5py
+
+        matrix_path = self._make_valid_directory(tmp_path)
+        with h5py.File(matrix_path, "a") as h5:
+            del h5[field]
+            h5.create_group(field)
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            DeepHData.from_directory(tmp_path)
+
+        assert f"hamiltonian.h5: {field}: expected an HDF5 dataset" in str(
+            exc_info.value
+        )
+
+    def test_required_dataset_must_not_be_a_dangling_link(self, tmp_path):
+        import h5py
+
+        matrix_path = self._make_valid_directory(tmp_path)
+        with h5py.File(matrix_path, "a") as h5:
+            del h5["entries"]
+            h5["entries"] = h5py.SoftLink("/missing")
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            DeepHData.from_directory(tmp_path)
+
+        assert "hamiltonian.h5: entries: could not resolve" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value"),
+        [
+            ("atom_pairs", np.array([[0, 0, 0, 0, 0]], dtype=np.float64)),
+            ("chunk_boundaries", np.array([0.0, 1.0])),
+            ("chunk_shapes", np.array([[1.0, 1.0]])),
+            ("entries", np.array([1.0 + 2.0j])),
+        ],
+    )
+    def test_invalid_dataset_dtype_rejected(self, tmp_path, field, bad_value):
+        import h5py
+
+        matrix_path = self._make_valid_directory(tmp_path)
+        with h5py.File(matrix_path, "a") as h5:
+            del h5[field]
+            h5.create_dataset(field, data=bad_value)
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            DeepHData.from_directory(tmp_path)
+
+        assert f"hamiltonian.h5: {field}:" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value"),
+        [
+            ("atom_pairs", np.zeros((1, 4), dtype=np.int32)),
+            ("chunk_boundaries", np.array([0], dtype=np.int32)),
+            ("chunk_shapes", np.ones((1, 1), dtype=np.int32)),
+            ("entries", np.ones((1, 1), dtype=np.float64)),
+            ("entries", np.array(1.0)),
+        ],
+    )
+    def test_invalid_dataset_shape_rejected(self, tmp_path, field, bad_value):
+        import h5py
+
+        matrix_path = self._make_valid_directory(tmp_path)
+        with h5py.File(matrix_path, "a") as h5:
+            del h5[field]
+            h5.create_dataset(field, data=bad_value)
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            DeepHData.from_directory(tmp_path)
+
+        assert f"hamiltonian.h5: {field}:" in str(exc_info.value)
+
+    def test_duplicate_atom_pairs_rejected(self, tmp_path):
+        self._write_metadata(tmp_path)
+        self._write_matrix(
+            tmp_path,
+            atom_pairs=np.array([[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]], dtype=np.int32),
+            chunk_boundaries=np.array([0, 1, 2], dtype=np.int32),
+            chunk_shapes=np.array([[1, 1], [1, 1]], dtype=np.int32),
+            entries=np.array([1.0, 2.0]),
+        )
+
+        with pytest.raises(AimspyConfigError, match="duplicate pair keys"):
+            DeepHData.from_directory(tmp_path)
+
+    def test_atom_index_out_of_range_rejected(self, tmp_path):
+        self._write_metadata(tmp_path)
+        self._write_matrix(
+            tmp_path,
+            atom_pairs=np.array([[0, 0, 0, 0, 1]], dtype=np.int32),
+        )
+
+        with pytest.raises(AimspyConfigError, match="atom indices"):
+            DeepHData.from_directory(tmp_path)
+
+    @pytest.mark.parametrize(
+        ("boundaries", "entries", "message"),
+        [
+            (np.array([1, 2], dtype=np.int32), np.ones(2), "first value"),
+            (np.array([0, 2], dtype=np.int32), np.ones(2), "span is"),
+            (np.array([0, 1], dtype=np.int32), np.ones(2), "final boundary"),
+        ],
+    )
+    def test_boundary_invariants_rejected(self, tmp_path, boundaries, entries, message):
+        self._write_metadata(tmp_path)
+        self._write_matrix(
+            tmp_path,
+            chunk_boundaries=boundaries,
+            entries=entries,
+        )
+
+        with pytest.raises(AimspyConfigError, match=message):
+            DeepHData.from_directory(tmp_path)
+
+    def test_non_monotonic_boundaries_rejected(self, tmp_path):
+        self._write_metadata(tmp_path)
+        self._write_matrix(
+            tmp_path,
+            atom_pairs=np.array([[0, 0, 0, 0, 0], [1, 0, 0, 0, 0]], dtype=np.int32),
+            chunk_boundaries=np.array([0, 2, 1], dtype=np.int32),
+            chunk_shapes=np.array([[1, 1], [1, 1]], dtype=np.int32),
+            entries=np.array([1.0]),
+        )
+
+        with pytest.raises(AimspyConfigError, match="non-decreasing"):
+            DeepHData.from_directory(tmp_path)
+
+    def test_block_shape_must_match_orbital_map(self, tmp_path):
+        self._write_metadata(tmp_path)
+        self._write_matrix(
+            tmp_path,
+            chunk_boundaries=np.array([0, 2], dtype=np.int32),
+            chunk_shapes=np.array([[2, 1]], dtype=np.int32),
+            entries=np.ones(2),
+        )
+
+        with pytest.raises(AimspyConfigError, match="expected.*1, 1"):
+            DeepHData.from_directory(tmp_path)
+
+    def test_overlap_only_can_define_canonical_layout(self, tmp_path):
+        self._write_metadata(tmp_path)
+        self._write_matrix(tmp_path, filename="overlap.h5", entries=np.array([0.5]))
+
+        data = DeepHData.from_directory(tmp_path)
+
+        assert data.entries is None
+        np.testing.assert_allclose(data.overlap_entries, [0.5])
+
+    @pytest.mark.parametrize(
+        ("filename", "attribute"),
+        [
+            ("hamiltonian.h5", "entries"),
+            ("overlap.h5", "overlap_entries"),
+            ("hamiltonian_init.h5", "initial_hamiltonian_entries"),
+        ],
+    )
+    def test_each_standard_matrix_file_can_load_alone(
+        self, tmp_path, filename, attribute
+    ):
+        self._write_metadata(tmp_path)
+        self._write_matrix(tmp_path, filename=filename, entries=np.array([0.75]))
+
+        data = DeepHData.from_directory(tmp_path)
+
+        np.testing.assert_allclose(getattr(data, attribute), [0.75])
+
+    def test_all_standard_matrix_files_validate_and_load(self, tmp_path):
+        self._write_metadata(tmp_path)
+        self._write_matrix(tmp_path, entries=np.array([1.0]))
+        self._write_matrix(tmp_path, filename="overlap.h5", entries=np.array([0.5]))
+        self._write_matrix(
+            tmp_path,
+            filename="hamiltonian_init.h5",
+            entries=np.array([0.25]),
+        )
+
+        data = DeepHData.from_directory(tmp_path)
+
+        np.testing.assert_allclose(data.entries, [1.0])
+        np.testing.assert_allclose(data.overlap_entries, [0.5])
+        np.testing.assert_allclose(data.initial_hamiltonian_entries, [0.25])
+
+    def test_second_matrix_with_wrong_shape_rejected(self, tmp_path):
+        self._make_valid_directory(tmp_path)
+        self._write_matrix(
+            tmp_path,
+            filename="overlap.h5",
+            chunk_boundaries=np.array([0, 2], dtype=np.int32),
+            chunk_shapes=np.array([[1, 2]], dtype=np.int32),
+            entries=np.ones(2),
+        )
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            DeepHData.from_directory(tmp_path)
+
+        assert "overlap.h5: chunk_shapes:" in str(exc_info.value)
+
+    def test_invalid_electric_response_shape_rejected(self, tmp_path):
+        self._make_valid_directory(tmp_path)
+        self._write_matrix(
+            tmp_path,
+            filename="electric_response.h5",
+            chunk_boundaries=np.array([0, 2], dtype=np.int32),
+            chunk_shapes=np.array([[2, 1]], dtype=np.int32),
+            entries=np.ones(2),
+        )
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            DeepHData.from_directory(tmp_path)
+
+        assert "electric_response.h5: chunk_shapes:" in str(exc_info.value)
+
+    def test_invalid_electric_response_entries_length_rejected(self, tmp_path):
+        self._make_valid_directory(tmp_path)
+        self._write_matrix(
+            tmp_path,
+            filename="electric_response.h5",
+            chunk_boundaries=np.array([0, 3], dtype=np.int32),
+            chunk_shapes=np.array([[3, 1]], dtype=np.int32),
+            entries=np.ones(2),
+        )
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            DeepHData.from_directory(tmp_path)
+
+        assert "electric_response.h5: entries:" in str(exc_info.value)
+
+    def test_invalid_in_memory_layout_rejected_before_write(self, tmp_path):
+        data = DeepHData(
+            lattice=np.eye(3),
+            atom_symbols=["H"],
+            atom_coords=np.zeros((1, 3)),
+            elements_orbital_map={"H": [0]},
+            n_basis=1,
+            atom_pairs=np.array([[0, 0, 0, 0, 0]], dtype=np.int32),
+            chunk_boundaries=np.array([0, 1], dtype=np.int32),
+            chunk_shapes=np.array([[1, 1]], dtype=np.int32),
+            entries=np.array([1.0, 2.0]),
+            path=tmp_path,
+        )
+
+        with pytest.raises(AimspyConfigError) as exc_info:
+            data.save_hamiltonian()
+
+        assert "hamiltonian.h5: entries:" in str(exc_info.value)
+        assert not (tmp_path / "hamiltonian.h5").exists()
 
 
 # =============================================================================

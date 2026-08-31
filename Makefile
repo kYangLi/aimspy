@@ -3,6 +3,7 @@
         test-all test-memory-loop test-dHde-capture test-dHde-inject-direct \
         test-dHde-inject-defer test-dHde run-from-scratch run-continue-calc run-example \
         test-grid-data-capture test-basis-export test-basis-callback-paths \
+        test-observables \
         build lint help patch
 
 VENV := .venv
@@ -29,6 +30,7 @@ help:
 	@echo "  test-grid-data-capture Run real-space grid capture test (MoS2_LDA)"
 	@echo "  test-basis-export     Run NAO basis export test (MoS2_LDA)"
 	@echo "  test-basis-callback-paths  Run basis callback registration-semantics test (MoS2_LDA)"
+	@echo "  test-observables     Run final energy/force/analytical-stress API test"
 	@echo "  test-integration     Run all integration tests in dependency order"
 	@echo "  test-memory-loop     Run 15-cycle memory pressure test (capture_overlap=True)"
 	@echo "  test-all             Run unit + integration tests"
@@ -114,10 +116,13 @@ test-basis-export:
 test-basis-callback-paths:
 	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_basis_callback_paths.py
 
+test-observables:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_observables.py
+
 test-integration: test-baseline test-export-deeph test-warmstart \
                   test-capture-overlap test-regression test-strategies test-dHde \
                   test-dHde-serial test-callback-reset test-grid-data-capture \
-                  test-basis-export test-basis-callback-paths
+                  test-basis-export test-basis-callback-paths test-observables
 
 test-all: test test-integration
 

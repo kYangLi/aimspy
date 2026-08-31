@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 
 from ._system import chdir_cm
 from ._exceptions import (
+    AimspyBindingError,
     AimspyConfigError,
     AimspyStateError,
     AimspyCallbackError,
@@ -87,8 +88,10 @@ from .matrix import (
     get_rs_hamiltonian,
     get_rs_overlap,
     get_forces,
+    get_stress,
     AimspyMatrix,
 )
+from .observables import get_free_atom_reference_energies
 
 _log = logging.getLogger("aimspy")
 _log.addHandler(logging.NullHandler())
@@ -289,6 +292,9 @@ class Calculator:
         self._modify_first_order: Optional[SimpleNamespace] = None
 
         self._forces: Optional[np.ndarray] = None
+        self._stress: Optional[np.ndarray] = None
+        self._stress_capture_error: Optional[str] = None
+        self._free_atom_reference_energies: Optional[np.ndarray] = None
 
     # ==================================================================
     # Logging helpers — INFO/WARNING on rank 0 only; ERROR on all ranks
@@ -501,6 +507,19 @@ class Calculator:
         except Exception as e:
             self._log_warning("forces capture failed: %r", e)
         try:
+            self._stress = get_stress(self._binding)
+        except Exception as e:
+            # Keep older libaims builds usable for workflows that never request
+            # stress, but never turn a binding/read failure into the semantic
+            # ``None`` value that means "analytical stress was not computed".
+            # Store text rather than the exception object so its traceback does
+            # not retain this Calculator and its large runtime arrays in a cycle.
+            self._stress_capture_error = f"{type(e).__name__}: {e}"
+            self._log_warning(
+                "stress capture failed; accessing stress will raise: %s",
+                self._stress_capture_error,
+            )
+        try:
             self._check_callback_errors()
         except AimspyCallbackError:
             # A callback raised during SCF — results are untrustworthy.
@@ -629,16 +648,75 @@ class Calculator:
 
     @property
     def energy(self) -> float:
-        """SCF total energy (Hartree).
+        """Legacy total-energy selector (Hartree).
 
         Available in ``DONE`` state. Also accessible in ``RUNNING``
         (e.g. from inside a callback during pre-SCF), but the value
         may be uninitialized before the first SCF iteration completes.
+
+        This compatibility property may select a post-SCF energy.  Use
+        :attr:`energy_raw` for ``total_energy`` or :attr:`energy_free` for the
+        force-consistent variational electronic free energy.
         """
         self._state_guard(
             CalcState.DONE, "read energy", allowed={CalcState.RUNNING, CalcState.DONE}
         )
         return self._binding.aimspy_energy()
+
+    @property
+    def energy_raw(self) -> float:
+        """Final uncorrected ``total_energy`` in Hartree.
+
+        This is the quantity printed by FHI-aims as ``Total energy
+        uncorrected``.  It deliberately excludes post-SCF energy selectors.
+        """
+        self._state_guard(CalcState.DONE, "read energy_raw")
+        return self._binding.aimspy_energy_raw()
+
+    @property
+    def energy_free(self) -> float:
+        """Final variational electronic free energy in Hartree.
+
+        Defined as ``total_energy + 2 * entropy_correction``.  Its negative
+        coordinate derivative gives the uncleaned analytical forces, so this
+        is the recommended scalar target for conservative machine-learning
+        potentials at fixed electronic settings.
+        """
+        self._state_guard(CalcState.DONE, "read energy_free")
+        return self._binding.aimspy_energy_free()
+
+    @property
+    def free_atom_reference_energies(self) -> np.ndarray:
+        """Per-species radial-atom reference energies in Hartree.
+
+        These are the complete total energies of the atomic problems already
+        solved by FHI-aims while constructing its free-atom data.  They are
+        indexed in the same order as :attr:`info.species_names` and are fixed
+        by the resolved species and atomic-solver settings, not by atomic
+        positions or the simulation cell.
+        """
+        self._state_guard(
+            CalcState.INITED,
+            "read free_atom_reference_energies",
+            allowed={CalcState.INITED, CalcState.RUNNING, CalcState.DONE},
+        )
+        if self._free_atom_reference_energies is None:
+            self._free_atom_reference_energies = get_free_atom_reference_energies(
+                self._binding, self.info.n_species
+            )
+        return self._free_atom_reference_energies.copy()
+
+    @property
+    def free_atom_reference_energy(self) -> float:
+        """Sum of per-species reference energies for the current structure."""
+        references = self.free_atom_reference_energies
+        return float(np.sum(references[self.info.species_idx], dtype=np.float64))
+
+    @property
+    def energy_free_relative(self) -> float:
+        """Force-consistent free energy minus all atomic references (Hartree)."""
+        self._state_guard(CalcState.DONE, "read energy_free_relative")
+        return self.energy_free - self.free_atom_reference_energy
 
     @property
     def forces(self) -> Optional[np.ndarray]:
@@ -652,6 +730,23 @@ class Calculator:
         - After :meth:`close` / :meth:`force_close` (state cleared)
         """
         return self._forces
+
+    @property
+    def stress(self) -> Optional[np.ndarray]:
+        """Final analytical stress tensor, shape ``(3, 3)``, in eV/Å³.
+
+        The FHI-aims sign convention is preserved.  Returns ``None`` before
+        :meth:`calc`, when analytical stress was not computed, and after
+        :meth:`close` or :meth:`force_close` clears the cached result.  Raises
+        :class:`AimspyBindingError` if the final stress could not be captured;
+        this is distinct from a valid ``None`` returned by the Fortran API.
+        """
+        if self._stress_capture_error is not None:
+            raise AimspyBindingError(
+                "Final analytical stress capture failed: "
+                f"{self._stress_capture_error}"
+            )
+        return self._stress
 
     @property
     def rs_hamiltonian(self) -> np.ndarray:
@@ -1282,6 +1377,11 @@ class Calculator:
         self._structure = None
         # Forces cache
         self._forces = None
+        # Analytical stress cache
+        self._stress = None
+        self._stress_capture_error = None
+        # Per-species radial-atom reference energies
+        self._free_atom_reference_energies = None
         # Modify config: explicitly clear internal fields before dropping,
         # to release user fn / source / option references
         if self._modify is not None:

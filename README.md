@@ -200,7 +200,7 @@ with Calculator(config) as calc:
       dd.save("deeph_out/")
 ```
 
-Optionally export forces and total energy to ``force.h5`` (MD-style format):
+Optionally export conservative force-field labels to ``force.h5``:
 
 ```python
 if rank == 0:
@@ -210,10 +210,19 @@ if rank == 0:
         overlap=calc.overlap,
         initial_hamiltonian=calc.initial_hamiltonian,
         force=calc.forces,    # (n_atoms, 3) eV/Å, aims order
-        energy=calc.energy,   # Hartree, auto-converted to eV
+        energy=calc.energy_free_relative,  # Hartree, auto-converted to eV
+        stress=calc.stress,   # (3, 3) eV/Å³, optional
     )
     dd.save("deeph_out/")    # writes force.h5 alongside H/S/H0
 ```
+
+`energy_free_relative` is the force-consistent electronic free energy minus the
+sum of the radial free-atom reference energies that FHI-aims already computes
+for the resolved species settings.  The per-species values and their sum are
+also available as `calc.free_atom_reference_energies` and
+`calc.free_atom_reference_energy`.
+If `calc.stress` is `None`, `force.h5` still contains a `(6,)` stress dataset
+filled with zeros, in DeepH order `[xx, yy, zz, yz, xz, xy]`.
 
 > **Note**: For the DeepH on-disk data format specification (POSCAR, info.json,
 > .h5 files), see [DeepH-dock Key Concepts](https://docs.deeph-pack.com/deeph-dock/en/latest/key_concepts.html).

@@ -84,6 +84,23 @@ def get_forces(binding, n_atoms: int) -> Optional[np.ndarray]:
     return raw * (HARTREE_TO_EV / BOHR_TO_ANG)
 
 
+def get_stress(binding) -> Optional[np.ndarray]:
+    """Read the final analytical stress tensor in eV/Å³.
+
+    FHI-aims stores the tensor as a Fortran ``(3, 3)`` array in
+    Hartree/Bohr³.  The sign convention is preserved exactly as reported by
+    FHI-aims.  Returns ``None`` when analytical stress was not computed.
+    """
+    from .data import HARTREE_TO_EV, BOHR_TO_ANG
+
+    ptr = binding.aimspy_stress()
+    if not ptr:
+        return None
+    flat = _ptr_to_ndarray(ptr, (9,))
+    raw = flat.reshape((3, 3), order="F")
+    return np.ascontiguousarray(raw * (HARTREE_TO_EV / BOHR_TO_ANG**3))
+
+
 # =============================================================================
 # AimspyMatrix — canonical block-sparse matrix in aimspy standard format
 # =============================================================================

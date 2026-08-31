@@ -111,14 +111,18 @@ try:
     S_aimspy = None
     h_init = None
     energy = 0.0
+    energy_free_relative = 0.0
     forces = None
+    stress = None
     if rank == 0:
         H = calc.rs_hamiltonian
         energy = calc.energy
+        energy_free_relative = calc.energy_free_relative
         H_aimspy = calc.hamiltonian
         S_aimspy = calc.overlap
         h_init = calc.initial_hamiltonian
         forces = calc.forces
+        stress = calc.stress
 
     # Shared data (available on all ranks)
     s = calc.structure
@@ -207,7 +211,8 @@ try:
             overlap=S_aimspy,
             initial_hamiltonian=h_init,
             force=forces,
-            energy=energy,
+            energy=energy_free_relative,
+            stress=stress,
         )
         check("from_aimspy(H+S+H_init) n_atoms", dd_all.n_atoms == 3)
         check("from_aimspy(H+S+H_init) n_pairs", dd_all.n_pairs > 0)
@@ -225,8 +230,12 @@ try:
         check("from_aimspy force shape", dd_all.force.shape == (3, 3))
         check(
             "from_aimspy energy_eV matches (Hartree→eV)",
-            abs(dd_all.energy_eV - energy * HARTREE_TO_EV) < 1e-6,
+            abs(dd_all.energy_eV - energy_free_relative * HARTREE_TO_EV) < 1e-6,
             f"energy_eV={dd_all.energy_eV:.6f}",
+        )
+        check(
+            "from_aimspy stress availability preserved",
+            (dd_all.stress is None) == (stress is None),
         )
         # force reordering check: POSCAR → aims should match original
         old2new, _ = s.build_atom_permutation()
@@ -263,6 +272,19 @@ try:
             "save/load energy_eV",
             dd_reloaded.energy_eV is not None
             and abs(dd_all.energy_eV - dd_reloaded.energy_eV) < 1e-6,
+        )
+        check(
+            "save/load stress",
+            (
+                dd_all.stress is None
+                and dd_reloaded.stress is not None
+                and np.array_equal(dd_reloaded.stress, np.zeros((3, 3)))
+            )
+            or (
+                dd_reloaded.stress is not None
+                and dd_all.stress is not None
+                and np.allclose(dd_reloaded.stress, dd_all.stress)
+            ),
         )
         check("save/load force.h5 exists", (tmp_dir2 / "force.h5").is_file())
         check(
