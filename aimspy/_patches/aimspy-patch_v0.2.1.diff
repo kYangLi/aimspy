@@ -158,16 +158,21 @@ index 99810d70..960eaa1f 100644
              call localorb_info(info_str, use_unit,'(A)',OL_norm)
 diff --git a/src/aimspy_api/CMakeLists.txt b/src/aimspy_api/CMakeLists.txt
 new file mode 100644
-index 00000000..d82a5245
+index 00000000..b4fc26fd
 --- /dev/null
 +++ b/src/aimspy_api/CMakeLists.txt
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,23 @@
 +# AimSpy API
-+# These files are added to aims1, same layer as ASI API files.
++# Split by dependency layer:
++#   - free_atom_reference.f90: no project-module deps; used by get_free_atoms.f90 (aims1)
++#   - the rest: use physics/analytical_stress/etc (aims5)
 +
 +target_sources(aims1 PRIVATE
-+    ${CMAKE_CURRENT_LIST_DIR}/callback.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/free_atom_reference.f90
++)
++
++target_sources(aims5 PRIVATE
++    ${CMAKE_CURRENT_LIST_DIR}/callback.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/api_bank.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/info.f90
 +    ${CMAKE_CURRENT_LIST_DIR}/register.f90
@@ -176,7 +181,7 @@ index 00000000..d82a5245
 +)
 +
 +if(BUILD_SHARED_LIBS)
-+    target_sources(aims1 PRIVATE
++    target_sources(aims5 PRIVATE
 +        ${CMAKE_CURRENT_LIST_DIR}/main.f90
 +    )
 +endif()
