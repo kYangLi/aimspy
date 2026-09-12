@@ -105,7 +105,7 @@ _info("=== Stage 1: user pre-init registration ===")
 fired = []
 calc = Calculator(_fresh_config())
 calc.register_callback("export_basis_data", lambda ax, bd: fired.append(bd.n_basis_fns))
-calc.init()
+calc.init(work_dir=DATA_DIR)
 comm.Barrier()
 check(
     "user callback fired during init",
@@ -131,7 +131,7 @@ def _boom(ax, bd):
 calc.register_callback("export_basis_data", _boom)
 init_err = None
 try:
-    calc.init()
+    calc.init(work_dir=DATA_DIR)
 except AimspyCallbackError as exc:
     init_err = exc
 except BaseException as exc:  # noqa: BLE001 — record anything unexpected
@@ -166,7 +166,7 @@ def _user_handler(ax, bd):
 
 
 calc.register_callback("export_basis_data", _user_handler)
-calc.init()
+calc.init(work_dir=DATA_DIR)
 comm.Barrier()
 check(
     "user callback fired (precedence over built-in capture)",

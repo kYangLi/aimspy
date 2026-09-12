@@ -1319,8 +1319,9 @@ class TestAtomPairsReorder:
         with pytest.raises(AimspyConfigError):
             DeepHData.from_directory(tmp_path)
 
-    def test_spinful_info_raises(self, tmp_path):
-        """info.json with spinful:true raises AimspyConfigError."""
+    def test_spinful_info_with_standard_layout_raises(self, tmp_path):
+        """info.json with spinful:true requires the doubled chunk layout —
+        a standard (non-doubled) hamiltonian.h5 raises a layout error."""
         from aimspy import AimspyConfigError
         import json as _json
         from aimspy.interface.deeph.data import _write_poscar
@@ -1336,6 +1337,7 @@ class TestAtomPairsReorder:
                 {
                     "elements_orbital_map": {"Mo": [0, 0, 1], "S": [0, 0]},
                     "spinful": True,
+                    "spin_treatment": "collinear",
                 },
                 f,
             )
@@ -1343,7 +1345,7 @@ class TestAtomPairsReorder:
         cb = np.array([0, 1], dtype=np.int32)
         cs = np.array([[1, 1]], dtype=np.int32)
         self._write_matrix(tmp_path, "hamiltonian", ap, cb, cs, np.array([1.0]))
-        with pytest.raises(AimspyConfigError, match="spin"):
+        with pytest.raises(AimspyConfigError, match="chunk_shapes"):
             DeepHData.from_directory(tmp_path)
 
     def test_electric_response_reorder_3x_blocks(self, tmp_path):

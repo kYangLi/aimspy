@@ -150,7 +150,9 @@ class CalculatorConfig:
         If True, register the ``export_dHde`` callback so that
         :attr:`Calculator.first_order_hamiltonian` is available after
         ``calc()`` (requires ``electric_field_response DFPT`` in
-        control.in). Default False.
+        control.in). Spin-polarized systems (``n_spin=2``) are rejected —
+        only the alpha channel could be captured, which would silently
+        drop beta. Default False.
     capture_grid_data : bool
         If True, register the ``export_grid_data`` callback so that
         :attr:`Calculator.grid_data` (this rank's real-space grid subset:
@@ -959,6 +961,18 @@ class Calculator:
             User-specified data passed to the deferred source function
             as second argument.
 
+        **Spin-polarized (collinear) systems**: the source must match the
+        live Hamiltonian's spin channels — for a ``spin collinear``
+        calculation pass a spinful source (e.g. :class:`~aimspy.DeepHData`
+        loaded from a directory whose ``info.json`` has
+        ``"spinful": true`` and ``"spin_treatment": "collinear"``);
+        ``to_aimspy`` then returns stacked ``(2*n_orb_i, n_orb_j)``
+        blocks with the alpha (spin-up) rows first and beta (spin-down)
+        rows second.  REPLACE and ADD validate
+        ``external.n_spin == live.n_spin`` inside the ``modify_h0``
+        callback; a mismatch surfaces as :class:`AimspyCallbackError`
+        after :meth:`calc` completes.
+
         Returns
         -------
         callable or None
@@ -1051,6 +1065,12 @@ class Calculator:
         *source* must implement ``to_first_order_aimspy(structure) ->
         list[AimspyMatrix]`` (3 matrices ``[x, y, z]``, Hartree) — e.g.
         :class:`aimspy.DeepHData`.
+
+        **Spin-polarized systems**: dH/de modification is rejected for
+        spin collinear systems (``n_spin=2``) — the source would only
+        cover the alpha channel, silently zeroing the beta channel of
+        the Fortran first-order Hamiltonian. The rejection surfaces as
+        :class:`AimspyCallbackError` after :meth:`calc`.
 
         **Direct mode** (pre-built source)::
 
@@ -1559,6 +1579,16 @@ class Calculator:
             def _on_export_first_order_hamiltonian(
                 ax, dHde, n_ham, n_dir, n_spin, j_coord
             ):
+                if int(n_spin) != 1:
+                    # Mirrors the modify_h0 cross-spin guard: reading only
+                    # channel 0 would silently drop the beta channel of the
+                    # Fortran (n_dir, 1, n_ham, n_spin) buffer.
+                    raise AimspyConfigError(
+                        "export_dHde: capture of spin-polarized dH/de "
+                        f"(n_spin={int(n_spin)}) is not supported; refusing "
+                        "to silently drop the beta channel (spinful dH/de "
+                        "is out of scope)"
+                    )
                 csr = ax.get("csr_descr")
                 if csr is None:
                     return
@@ -1604,6 +1634,17 @@ class Calculator:
             def _on_modify_first_order_hamiltonian(
                 ax, mx_addr, n_ham, n_dir, n_spin, j_coord
             ):
+                if int(n_spin) != 1:
+                    # Mirrors the modify_h0 cross-spin guard: an n_spin=1
+                    # source written through a spinful descriptor would
+                    # silently zero the beta channel of the Fortran
+                    # (n_dir, 1, n_ham, n_spin) buffer.
+                    raise AimspyConfigError(
+                        "modify_dHde: modification of spin-polarized dH/de "
+                        f"(n_spin={int(n_spin)}) is not supported; refusing "
+                        "to silently zero the beta channel (spinful dH/de "
+                        "is out of scope)"
+                    )
                 md = ax.get("modify_first_order")
                 csr = ax.get("csr_descr")
                 if md is None or csr is None:
@@ -1757,6 +1798,23 @@ def _apply_strategy(
     """
     s = mspec.strategy
     rank = aux.get("rank", 0)
+
+    # Cross-spin modification is rejected: replacing/adding a spinless
+    # source into a spin-polarized live matrix (or vice versa) would create
+    # blocks whose shape contradicts the matrix's n_spin, which to_aims_csr
+    # silently zero-fills — corrupting the Fortran initial Hamiltonian.
+    # SCALE never touches an external source and CUSTOM delegates to the
+    # user, so the guard only covers REPLACE and ADD.
+    if (
+        external is not None
+        and s in (Strategy.REPLACE, Strategy.ADD)
+        and external.n_spin != live.n_spin
+    ):
+        raise AimspyConfigError(
+            f"modify strategy {s.value}: external source n_spin="
+            f"{external.n_spin} does not match the live initial Hamiltonian "
+            f"n_spin={live.n_spin}"
+        )
 
     if s == Strategy.REPLACE:
         if external is not None:

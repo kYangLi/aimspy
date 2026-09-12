@@ -462,6 +462,55 @@ def _first_order_canonical_layout(canonical: _MatrixLayout) -> _MatrixLayout:
     )
 
 
+def _standard_canonical_layout(canonical: _MatrixLayout) -> _MatrixLayout:
+    """Standard (spin-independent) layout from a spinful canonical layout.
+
+    Halves the doubled chunk_shapes rows of a spinful (``n_spin=2``)
+    canonical layout — the layout used by the spin-independent overlap —
+    and rebuilds the matching chunk_boundaries.
+    """
+    chunk_shapes = canonical.chunk_shapes.copy()
+    chunk_shapes[:, 0] //= 2
+    sizes = np.prod(chunk_shapes.astype(np.int64), axis=1)
+    boundaries64 = np.concatenate(([0], np.cumsum(sizes, dtype=np.int64)))
+    if int(boundaries64[-1]) > np.iinfo(np.int32).max:
+        raise AimspyConfigError("overlap.h5: chunk_boundaries exceed int32 range")
+    boundaries = boundaries64.astype(np.int32)
+    return _MatrixLayout(
+        atom_pairs=canonical.atom_pairs.copy(),
+        chunk_boundaries=boundaries,
+        chunk_shapes=chunk_shapes,
+        entries=np.empty(int(boundaries[-1]), dtype=np.float64),
+    )
+
+
+def _block_key_atom_indices(key: tuple, n_atoms: int, label: str) -> tuple[int, int]:
+    """Extract validated ``(atom_i, atom_j)`` from a block key.
+
+    Block keys are 5-tuples ``(R1, R2, R3, atom_i, atom_j)``; this helper
+    rejects malformed keys with :class:`AimspyConfigError` instead of a
+    raw ``IndexError``/``ValueError``.
+    """
+    if not isinstance(key, (tuple, list)) or len(key) < 5:
+        raise AimspyConfigError(
+            f"from_memory: {label} key {key!r} must be a 5-tuple "
+            "(R1, R2, R3, atom_i, atom_j)"
+        )
+    try:
+        i, j = int(key[3]), int(key[4])
+    except (TypeError, ValueError):
+        raise AimspyConfigError(
+            f"from_memory: {label} key {key!r} has non-integer atom "
+            f"indices ({key[3]!r}, {key[4]!r})"
+        )
+    if not (0 <= i < n_atoms and 0 <= j < n_atoms):
+        raise AimspyConfigError(
+            f"from_memory: {label} key {key!r} atom indices "
+            f"({i}, {j}) out of range [0, {n_atoms})"
+        )
+    return i, j
+
+
 def _reorder_flat_entries(
     entries: np.ndarray,
     src_atom_pairs: np.ndarray,
@@ -856,6 +905,16 @@ class DeepHData:
 
     Can also be constructed in-memory via ``from_memory`` or from
     aimspy standard-format matrices via ``from_aimspy``.
+
+    Spinful (collinear, ``n_spin=2``) data is flagged by
+    ``info.json``'s ``"spinful": true`` plus ``"spin_treatment":
+    "collinear"`` (mirrored by :attr:`_spinful`): the Hamiltonian-class
+    matrices use a doubled ``(2*n_rows, n_cols)`` chunk layout in which
+    each atom pair's flat segment is ``[alpha block ‖ beta block]``, while
+    the spin-independent overlap keeps the standard ``(n_rows, n_cols)``
+    layout (recorded in ``_ovlp_chunk_*``).      Spinful data without
+    ``spin_treatment`` (the legacy four-quadrant complex layout produced
+    by ``ref/aims_to_deeph.py``) is rejected on read with a clear error.
     """
 
     # structure (POSCAR order = element-grouped)
@@ -900,6 +959,17 @@ class DeepHData:
     # Added after the legacy positional fields to keep direct construction compatible.
     stress: Optional[np.ndarray] = None  # (3, 3) float64, eV/Å³
 
+    # Spinful (collinear, n_spin=2) support.  When _spinful is True, the
+    # Hamiltonian-class entries (entries / initial_hamiltonian_entries)
+    # use the doubled (2*n_rows, n_cols) chunk layout stored in chunk_*;
+    # each atom pair's flat segment is [alpha block ‖ beta block].  The
+    # spin-independent overlap keeps the standard layout, recorded in
+    # _ovlp_chunk_* (derived lazily when absent).  Mirrors the existing
+    # _fo_chunk_* pattern for the first-order Hamiltonian.
+    _spinful: bool = False
+    _ovlp_chunk_boundaries: Optional[np.ndarray] = None
+    _ovlp_chunk_shapes: Optional[np.ndarray] = None
+
     # ----------------------------------------------------------------
     # Construction from directory
     # ----------------------------------------------------------------
@@ -942,10 +1012,33 @@ class DeepHData:
         lattice, atom_symbols, atom_coords = _read_poscar(poscar_path)
         with open(info_path, "r") as f:
             info = json.load(f)
-        if info.get("spinful", False):
+        spinful = bool(info.get("spinful", False))
+        if spinful:
+            treatment = info.get("spin_treatment")
+            if treatment is None:
+                raise AimspyConfigError(
+                    "info.json: spinful data without 'spin_treatment' uses "
+                    "the legacy four-quadrant (2*n_rows, 2*n_cols) complex "
+                    "layout (e.g. produced by ref/aims_to_deeph.py); this "
+                    "adapter reads only the compact collinear layout "
+                    "(spin_treatment='collinear')"
+                )
+            if treatment != "collinear":
+                raise AimspyConfigError(
+                    f"info.json: unsupported spin_treatment {treatment!r}; "
+                    "only 'collinear' is supported"
+                )
+        if spinful and not any(
+            name in ("hamiltonian", "initial_hamiltonian") for name, _ in found
+        ):
             raise AimspyConfigError(
-                "spin-polarized (spinful) DeepH data is not yet supported "
-                "by the aimspy adapter (n_spin=1 only)"
+                "spinful=true requires hamiltonian.h5 or hamiltonian_init.h5 "
+                "(overlap.h5 alone is spin-independent)"
+            )
+        if spinful and (path / "electric_response.h5").is_file():
+            raise AimspyConfigError(
+                "electric_response.h5 (dH/de) is not yet supported for "
+                "spinful DeepH data"
             )
         eom = info.get("elements_orbital_map", {})
         n_basis = info.get("orbits_quantity", 0)
@@ -954,20 +1047,43 @@ class DeepHData:
         fermi_eV = info.get("fermi_energy_eV", 0.0)
 
         # Validate every standard matrix independently, then align it to the
-        # first available file's canonical atom-pair order.
+        # first available file's canonical atom-pair order.  Spinful
+        # Hamiltonian-class files use the doubled (2*n_rows, n_cols) chunk
+        # layout; the overlap always uses the standard layout.
         loaded = [
-            (name, p, _read_matrix_layout(p, atom_symbols, eom)) for name, p in found
+            (
+                name,
+                p,
+                _read_matrix_layout(
+                    p,
+                    atom_symbols,
+                    eom,
+                    row_multiplier=2 if (spinful and name != "overlap") else 1,
+                ),
+            )
+            for name, p in found
         ]
+        if spinful:
+            # The doubled canonical layout must come from a Hamiltonian-class
+            # file (stable sort moves overlap.h5, if present, to the end).
+            loaded.sort(key=lambda item: item[0] == "overlap")
         canonical = loaded[0][2]
         atom_pairs = canonical.atom_pairs
         cb = canonical.chunk_boundaries
         cs = canonical.chunk_shapes
+        ovlp_cb = None
+        ovlp_cs = None
+        if spinful:
+            std_canonical = _standard_canonical_layout(canonical)
+            ovlp_cb = std_canonical.chunk_boundaries
+            ovlp_cs = std_canonical.chunk_shapes
 
         entries = None
         overlap_entries = None
         init_entries = None
         for name, p, layout in loaded:
-            data = _align_matrix_layout(layout, canonical, p)
+            target = std_canonical if (spinful and name == "overlap") else canonical
+            data = _align_matrix_layout(layout, target, p)
             if name == "hamiltonian":
                 entries = data
             elif name == "overlap":
@@ -1023,6 +1139,9 @@ class DeepHData:
             stress=stress_arr,
             fermi_energy_eV=fermi_eV,
             path=path,
+            _spinful=spinful,
+            _ovlp_chunk_boundaries=ovlp_cb,
+            _ovlp_chunk_shapes=ovlp_cs,
         )
 
     @classmethod
@@ -1044,6 +1163,7 @@ class DeepHData:
         ] = None,
         path: Optional[Union[str, Path]] = None,
         stress: Optional[np.ndarray] = None,
+        spinful: bool = False,
     ) -> "DeepHData":
         """Build from in-memory pair-block dicts.
 
@@ -1062,14 +1182,35 @@ class DeepHData:
         three directions are concatenated per atom pair in DeepH order
         ``[y, z, x]`` (= real spherical harmonics ``m = -1, 0, +1``) and
         stored in :attr:`first_order_hamiltonian_entries`.
+
+        *spinful* selects the collinear (``n_spin=2``) layout: the
+        Hamiltonian-class blocks must be stacked ``(2*n_orb_i, n_orb_j)``
+        with the alpha (spin-up) channel in rows ``[0, n_orb_i)`` and the
+        beta (spin-down) channel in rows ``[n_orb_i, 2*n_orb_i)`` (Hartree
+        per channel), and are stored with the doubled chunk layout.  The
+        spin-independent overlap blocks keep the standard
+        ``(n_orb_i, n_orb_j)`` shape and layout.  At least one
+        Hamiltonian-class blocks dict is required when *spinful* is True.
         """
         if n_basis == 0:
             n_basis = _compute_n_basis(atom_symbols, elements_orbital_map)
+
+        if spinful and not (hamiltonian_blocks or initial_hamiltonian_blocks):
+            raise AimspyConfigError(
+                "spinful=True requires stacked hamiltonian_blocks or "
+                "initial_hamiltonian_blocks (overlap blocks alone are "
+                "spin-independent)"
+            )
 
         # The first-order Hamiltonian (dH/de) is only physically meaningful
         # when all three Cartesian directions are present; require all three
         # block dicts to be non-empty if provided at all.
         if first_order_hamiltonian_blocks is not None:
+            if spinful:
+                raise AimspyConfigError(
+                    "first_order_hamiltonian_blocks (dH/de) is not yet "
+                    "supported for spinful data"
+                )
             if (
                 not isinstance(first_order_hamiltonian_blocks, (list, tuple))
                 or len(first_order_hamiltonian_blocks) != 3
@@ -1085,20 +1226,58 @@ class DeepHData:
                     "meaningful when all three directions are present"
                 )
 
-        layout_blocks = (
-            hamiltonian_blocks
-            or overlap_blocks
-            or initial_hamiltonian_blocks
-            or (
-                first_order_hamiltonian_blocks[0]
-                if first_order_hamiltonian_blocks is not None
-                else None
+        # Spinful: the doubled chunk layout must come from a Hamiltonian-class
+        # dict, so it takes priority over the (standard-layout) overlap.
+        if spinful:
+            layout_blocks = hamiltonian_blocks or initial_hamiltonian_blocks
+        else:
+            layout_blocks = (
+                hamiltonian_blocks
+                or overlap_blocks
+                or initial_hamiltonian_blocks
+                or (
+                    first_order_hamiltonian_blocks[0]
+                    if first_order_hamiltonian_blocks is not None
+                    else None
+                )
             )
-        )
         if layout_blocks is None:
             raise AimspyConfigError("At least one matrix blocks dict must be provided")
+
+        if spinful:
+            counts = _orbital_counts_per_atom(
+                atom_symbols, elements_orbital_map, "from_memory"
+            )
+            for blocks_dict, label in (
+                (hamiltonian_blocks, "hamiltonian_blocks"),
+                (initial_hamiltonian_blocks, "initial_hamiltonian_blocks"),
+            ):
+                for key, blk in (blocks_dict or {}).items():
+                    i, j = _block_key_atom_indices(key, len(counts), label)
+                    expected = (2 * int(counts[i]), int(counts[j]))
+                    if blk.shape != expected:
+                        raise AimspyConfigError(
+                            f"from_memory: spinful {label} block {key} has "
+                            f"shape {tuple(blk.shape)}; expected stacked "
+                            f"{expected}"
+                        )
+            for key, blk in (overlap_blocks or {}).items():
+                i, j = _block_key_atom_indices(key, len(counts), "overlap_blocks")
+                expected = (int(counts[i]), int(counts[j]))
+                if blk.shape != expected:
+                    raise AimspyConfigError(
+                        f"from_memory: overlap block {key} has shape "
+                        f"{tuple(blk.shape)}; expected standard {expected} "
+                        "— the overlap is spin-independent"
+                    )
+
         sorted_keys = sorted(layout_blocks.keys())
         n_pairs = len(sorted_keys)
+        ovlp_cb = None
+        ovlp_cs = None
+        if spinful and overlap_blocks:
+            ovlp_cb = np.zeros((n_pairs + 1,), dtype=np.int32)
+            ovlp_cs = np.zeros((n_pairs, 2), dtype=np.int32)
         atom_pairs = np.zeros((n_pairs, 5), dtype=np.int32)
         chunk_boundaries = np.zeros((n_pairs + 1,), dtype=np.int32)
         chunk_shapes = np.zeros((n_pairs, 2), dtype=np.int32)
@@ -1121,8 +1300,15 @@ class DeepHData:
                     overlap_lst.append(
                         np.ascontiguousarray(blk, dtype=np.float64).ravel()
                     )
+                    onr, onc = int(blk.shape[0]), int(blk.shape[1])
                 else:
-                    overlap_lst.append(np.zeros(nr * nc, dtype=np.float64))
+                    # Zero-fill uses the standard (spin-independent) size.
+                    onr = nr // 2 if spinful else nr
+                    onc = nc
+                    overlap_lst.append(np.zeros(onr * onc, dtype=np.float64))
+                if ovlp_cs is not None:
+                    ovlp_cs[ip] = (onr, onc)
+                    ovlp_cb[ip + 1] = ovlp_cb[ip] + onr * onc
 
             if initial_hamiltonian_blocks:
                 blk = initial_hamiltonian_blocks.get(key)
@@ -1189,6 +1375,9 @@ class DeepHData:
             stress=stress,
             fermi_energy_eV=fermi_energy_eV,
             path=Path(path) if path is not None else None,
+            _spinful=spinful,
+            _ovlp_chunk_boundaries=ovlp_cb,
+            _ovlp_chunk_shapes=ovlp_cs,
         )
 
     # ----------------------------------------------------------------
@@ -1217,11 +1406,14 @@ class DeepHData:
         structure : AimspyStructure
             Used to build POSCAR-order layout unless *template* is given.
         hamiltonian : AimspyMatrix, optional
-            Hamiltonian (Hartree, aims atom order).
+            Hamiltonian (Hartree, aims atom order).  For collinear
+            spin-polarized systems pass a stacked matrix
+            (``n_spin == 2``; blocks ``(2*n_orb_i, n_orb_j)``).
         overlap : AimspyMatrix, optional
-            Overlap matrix (dimensionless).
+            Overlap matrix (dimensionless, always ``n_spin == 1``).
         initial_hamiltonian : AimspyMatrix, optional
-            Initial / free-atom Hamiltonian (Hartree).
+            Initial / free-atom Hamiltonian (Hartree).  Must share
+            ``n_spin`` with *hamiltonian*.
         template : DeepHData, optional
             If given, reuse its structure fields (lattice, atom_symbols,
             atom_coords, elements_orbital_map) instead of rebuilding
@@ -1260,6 +1452,21 @@ class DeepHData:
             and first_order_hamiltonian is None
         ):
             raise AimspyConfigError("At least one matrix must be provided")
+        h_spins = [
+            int(mx.n_spin)
+            for mx in (hamiltonian, initial_hamiltonian)
+            if mx is not None
+        ]
+        if h_spins and len(set(h_spins)) != 1:
+            raise AimspyConfigError(
+                "hamiltonian and initial_hamiltonian must share n_spin "
+                f"(got {h_spins})"
+            )
+        if overlap is not None and overlap.n_spin != 1:
+            raise AimspyConfigError(
+                f"overlap must be spin-independent (n_spin=1; got " f"{overlap.n_spin})"
+            )
+        spinful = bool(h_spins) and h_spins[0] == 2
         if template is not None:
             lattice = template.lattice.copy()
             atom_symbols = list(template.atom_symbols)
@@ -1303,6 +1510,15 @@ class DeepHData:
                     "first_order_hamiltonian must be a list of 3 AimspyMatrix "
                     "[x, y, z]"
                 )
+            if any(int(mx.n_spin) != 1 for mx in first_order_hamiltonian):
+                # Stacked blocks through the 3x first-order expansion
+                # would build entries inconsistent with the fo chunk
+                # layout (only caught at save time).
+                raise AimspyConfigError(
+                    "first_order_hamiltonian: dH/de is supported for "
+                    "spinless matrices only (n_spin=1); got n_spin="
+                    f"{[int(mx.n_spin) for mx in first_order_hamiltonian]}"
+                )
             first_order_blocks_list = [
                 _aimspy_blocks_to_poscar(mx, structure)
                 for mx in first_order_hamiltonian
@@ -1333,15 +1549,50 @@ class DeepHData:
             first_order_hamiltonian_blocks=first_order_blocks_list,
             path=path,
             stress=stress,
+            spinful=spinful,
         )
 
     # ----------------------------------------------------------------
     # Set individual matrices from AimspyMatrix
     # ----------------------------------------------------------------
+    def _require_hamiltonian_nspin(self, matrix: "AimspyMatrix", name: str) -> None:
+        """Guard: Hamiltonian-class matrices must match the spin layout."""
+        expected = 2 if self._spinful else 1
+        if matrix.n_spin != expected:
+            raise AimspyConfigError(
+                f"set_{name}: matrix has n_spin={matrix.n_spin} but this "
+                "DeepHData uses the "
+                f"{'spinful (n_spin=2)' if self._spinful else 'spinless (n_spin=1)'} "
+                f"layout (expected n_spin={expected})"
+            )
+
+    def _ovlp_layout(self) -> tuple[np.ndarray, np.ndarray]:
+        """Standard-layout (chunk_boundaries, chunk_shapes) for the overlap.
+
+        For spinless data this is just the shared ``chunk_*`` layout.  For
+        spinful data the standard layout is derived lazily from the doubled
+        Hamiltonian layout and cached in ``_ovlp_chunk_*``.
+        """
+        if not self._spinful:
+            return self.chunk_boundaries, self.chunk_shapes
+        if self._ovlp_chunk_boundaries is None or self._ovlp_chunk_shapes is None:
+            std = _standard_canonical_layout(
+                _MatrixLayout(
+                    atom_pairs=self.atom_pairs,
+                    chunk_boundaries=self.chunk_boundaries,
+                    chunk_shapes=self.chunk_shapes,
+                    entries=np.empty(0, dtype=np.float64),
+                )
+            )
+            self._ovlp_chunk_boundaries = std.chunk_boundaries
+            self._ovlp_chunk_shapes = std.chunk_shapes
+        return self._ovlp_chunk_boundaries, self._ovlp_chunk_shapes
+
     def set_hamiltonian(
         self, matrix: "AimspyMatrix", structure: "AimspyStructure"
     ) -> None:
         """Convert and store Hamiltonian entries (eV) from *matrix*."""
+        self._require_hamiltonian_nspin(matrix, "hamiltonian")
         blocks = _aimspy_blocks_to_poscar(matrix, structure)
         self.entries = _blocks_to_flat_entries(
             blocks,
@@ -1352,17 +1603,24 @@ class DeepHData:
 
     def set_overlap(self, matrix: "AimspyMatrix", structure: "AimspyStructure") -> None:
         """Convert and store overlap entries (dimensionless) from *matrix*."""
+        if matrix.n_spin != 1:
+            raise AimspyConfigError(
+                f"set_overlap: overlap must be spin-independent (n_spin=1; "
+                f"got {matrix.n_spin})"
+            )
         blocks = _aimspy_blocks_to_poscar(matrix, structure)
+        _, ovlp_cs = self._ovlp_layout()
         self.overlap_entries = _blocks_to_flat_entries(
             blocks,
             self.atom_pairs,
-            self.chunk_shapes,
+            ovlp_cs,
         )
 
     def set_initial_hamiltonian(
         self, matrix: "AimspyMatrix", structure: "AimspyStructure"
     ) -> None:
         """Convert and store initial Hamiltonian entries (eV) from *matrix*."""
+        self._require_hamiltonian_nspin(matrix, "initial_hamiltonian")
         blocks = _aimspy_blocks_to_poscar(matrix, structure)
         self.initial_hamiltonian_entries = _blocks_to_flat_entries(
             blocks,
@@ -1428,6 +1686,26 @@ class DeepHData:
             raise AimspyConfigError(
                 "matrix_list must contain exactly 3 AimspyMatrix [x, y, z]"
             )
+        if self._spinful:
+            # The doubled Hamiltonian-class chunk layout would be
+            # 3x-expanded into a meaningless 6x layout. Align with every
+            # other spinful dH/de entry point (from_directory /
+            # from_memory / from_aimspy), which all reject spinful.
+            raise AimspyConfigError(
+                "set_first_order_hamiltonian: dH/de is not yet supported "
+                "for spinful DeepHData (the doubled chunk layout cannot "
+                "be combined with the 3x first-order expansion)"
+            )
+        if any(int(mx.n_spin) != 1 for mx in matrix_list):
+            # Stacked blocks through the 3x first-order expansion would
+            # build entries inconsistent with the fo chunk layout (only
+            # caught at save time; to_first_order_aimspy would read
+            # misaligned data before that).
+            raise AimspyConfigError(
+                "set_first_order_hamiltonian: dH/de is supported for "
+                "spinless matrices only (n_spin=1); got n_spin="
+                f"{[int(mx.n_spin) for mx in matrix_list]}"
+            )
         blocks_list = [_aimspy_blocks_to_poscar(mx, structure) for mx in matrix_list]
         if not all(blocks_list[d] for d in range(3)):
             raise AimspyConfigError(
@@ -1454,15 +1732,24 @@ class DeepHData:
             )
         return self.path
 
-    def _write_matrix_h5(self, file_path: Path, entries: np.ndarray) -> None:
+    def _write_matrix_h5(
+        self,
+        file_path: Path,
+        entries: np.ndarray,
+        *,
+        chunk_boundaries: Optional[np.ndarray] = None,
+        chunk_shapes: Optional[np.ndarray] = None,
+        row_multiplier: int = 1,
+    ) -> None:
         layout = _validate_matrix_layout(
             file_path,
             self.atom_pairs,
-            self.chunk_boundaries,
-            self.chunk_shapes,
+            self.chunk_boundaries if chunk_boundaries is None else chunk_boundaries,
+            self.chunk_shapes if chunk_shapes is None else chunk_shapes,
             entries,
             self.atom_symbols,
             self.elements_orbital_map,
+            row_multiplier=row_multiplier,
         )
         with h5py.File(file_path, "w") as f:
             f.create_dataset("atom_pairs", data=layout.atom_pairs, dtype="i4")
@@ -1525,7 +1812,11 @@ class DeepHData:
             raise AimspyConfigError("No Hamiltonian entries to save")
         p = Path(path) if path is not None else self._require_path()
         p.mkdir(parents=True, exist_ok=True)
-        self._write_matrix_h5(p / "hamiltonian.h5", self.entries)
+        self._write_matrix_h5(
+            p / "hamiltonian.h5",
+            self.entries,
+            row_multiplier=2 if self._spinful else 1,
+        )
 
     def save_overlap(self, path: Optional[Union[str, Path]] = None) -> None:
         """Write overlap.h5 (requires overlap_entries to be set)."""
@@ -1533,7 +1824,14 @@ class DeepHData:
             raise AimspyConfigError("No overlap entries to save")
         p = Path(path) if path is not None else self._require_path()
         p.mkdir(parents=True, exist_ok=True)
-        self._write_matrix_h5(p / "overlap.h5", self.overlap_entries)
+        # The overlap is spin-independent: always the standard layout.
+        ovlp_cb, ovlp_cs = self._ovlp_layout()
+        self._write_matrix_h5(
+            p / "overlap.h5",
+            self.overlap_entries,
+            chunk_boundaries=ovlp_cb,
+            chunk_shapes=ovlp_cs,
+        )
 
     def save_initial_hamiltonian(self, path: Optional[Union[str, Path]] = None) -> None:
         """Write hamiltonian_init.h5 (requires initial_hamiltonian_entries)."""
@@ -1542,7 +1840,9 @@ class DeepHData:
         p = Path(path) if path is not None else self._require_path()
         p.mkdir(parents=True, exist_ok=True)
         self._write_matrix_h5(
-            p / "hamiltonian_init.h5", self.initial_hamiltonian_entries
+            p / "hamiltonian_init.h5",
+            self.initial_hamiltonian_entries,
+            row_multiplier=2 if self._spinful else 1,
         )
 
     def save_force(self, path: Optional[Union[str, Path]] = None) -> None:
@@ -1663,6 +1963,11 @@ class DeepHData:
         - R: no flip (same convention: ``R_aimspy = R_deeph = -R_aims``)
         - Parity: no change (same wiki convention)
         - Units: eV → Hartree
+        - Spin: spinful data (``_spinful``) yields a stacked matrix with
+          ``n_spin == 2`` and blocks ``(2*n_orb_i, n_orb_j)`` — each atom
+          pair's flat segment ``[alpha block ‖ beta block]`` is unpacked
+          into the alpha rows ``[0, n_orb_i)`` and beta rows
+          ``[n_orb_i, 2*n_orb_i)``.  Spinless data yields ``n_spin == 1``.
 
         The result is suitable for passing to
         :meth:`aimspy.Calculator.modify_init_ham` via ``source=``.
@@ -1709,13 +2014,24 @@ class DeepHData:
             nr = int(cs[ip, 0])
             nc = int(cs[ip, 1])
 
-            block = entries[bnd : bnd + nr * nc].reshape(nr, nc).copy()
-            block *= EV_TO_HARTREE  # eV -> Hartree
+            if self._spinful:
+                # Doubled layout: each pair's segment is [alpha ‖ beta],
+                # the exact inverse of from_memory's vstack([a, b]).ravel().
+                half = (nr // 2) * nc
+                pair_entries = entries[bnd : bnd + nr * nc]
+                alpha = pair_entries[:half].reshape(nr // 2, nc).copy()
+                beta = pair_entries[half:].reshape(nr // 2, nc).copy()
+                alpha *= EV_TO_HARTREE  # eV -> Hartree
+                beta *= EV_TO_HARTREE
+                block = np.vstack([alpha, beta])  # (2*n_orb_i, n_orb_j)
+            else:
+                block = entries[bnd : bnd + nr * nc].reshape(nr, nc).copy()
+                block *= EV_TO_HARTREE  # eV -> Hartree
 
             key = (R1, R2, R3, i_aims, j_aims)
             blocks[key] = block
 
-        return AimspyMatrix(blocks=blocks, n_spin=1)
+        return AimspyMatrix(blocks=blocks, n_spin=2 if self._spinful else 1)
 
     def to_first_order_aimspy(self, structure: "AimspyStructure") -> list:
         """Convert this DeepH data's first-order Hamiltonian entries to
@@ -1945,8 +2261,12 @@ def _write_info_json(path: Path, data: DeepHData) -> None:
         "orbits_quantity": n_basis,
         "occupation": _compute_occupation(data.atom_symbols),
         "orthogonal_basis": False,
-        "spinful": False,
+        "spinful": data._spinful,
         "fermi_energy_eV": data.fermi_energy_eV,
         "elements_orbital_map": data.elements_orbital_map,
     }
+    if data._spinful:
+        # Compact collinear layout marker — distinguishes this format from
+        # the legacy four-quadrant spinful layout.
+        obj["spin_treatment"] = "collinear"
     path.write_text(json.dumps(obj, indent=2))

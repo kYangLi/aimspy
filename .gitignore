@@ -16,6 +16,7 @@ tests/data/MoS2_LDA/*.npy
 tests/data/MoS2_LDA/*.npz
 tests/data/MoS2_LDA/viz_examples/
 tests/data/MoS2/deeph_warm/
+tests/data/MoS2_spin/deeph_spin_out/
 examples/*/deeph_data/
 examples/*/deeph_*/
 

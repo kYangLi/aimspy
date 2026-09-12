@@ -230,8 +230,11 @@ properties like `phase_factor`, `orbit_per_atom`, `atom_permutation`) and a
 
 ### Limitations
 
-- **Spinless only**: converters read/write spin channel 0; `n_spin=2` leaves
-  channel 1 as zero. Spin-polarised support is on the roadmap.
+- **Collinear spin supported; SOC / non-collinear not**: `n_spin=2`
+  Hamiltonians use stacked blocks `(2*n_orb_i, n_orb_j)` (alpha rows
+  first, beta rows second); the spin-independent overlap keeps `n_spin=1`
+  blocks. `to_aims_csr` requires an exact `n_spin` match between matrix
+  and descriptor.
 - **Periodic only**: matrix extraction/injection requires `use_local_index = .false.`
   (see [Troubleshooting](./troubleshooting.md)).
 

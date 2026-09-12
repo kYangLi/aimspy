@@ -6,6 +6,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Collinear spin (n_spin=2) Hamiltonian support** —
+  `AimspyMatrix.from_aims_csr` / `to_aims_csr` now accept 2-channel CSR
+  data (`h0` shape `(2, n_ham_size)`) and produce **stacked** blocks of
+  shape `(2*n_orb_i, n_orb_j)` (alpha rows first, beta rows second).
+  `n_spin` is inferred from the data shape, so the spin-independent
+  overlap (`(1, n_ham)`) keeps standard blocks even for spin-polarized
+  descriptors. Both channels carry identical R-sign / parity /
+  Hermitian semantics. `to_aims_csr` requires an exact `n_spin` match
+  between matrix and descriptor (a non-stacked matrix through a spinful
+  descriptor would yield a partially-zero Hamiltonian and is rejected);
+  `from_aims_csr` additionally rejects `n_spin > 2` and 2-channel data
+  combined with a spinless descriptor.
+- **Spinful DeepH export/import** — `DeepHData.from_aimspy` /
+  `from_memory(spinful=True)` / `from_directory` support
+  `info.json` `"spinful": true` + `"spin_treatment": "collinear"`:
+  `hamiltonian.h5` / `hamiltonian_init.h5` use the doubled
+  `(2*n_rows, n_cols)` chunk layout (each atom pair's flat segment is
+  `[alpha ‖ beta]`), while `overlap.h5` keeps the standard layout
+  (recorded in `_ovlp_chunk_*`, mirroring the `_fo_chunk_*` precedent).
+  `to_aimspy` unpacks the interleaved segments back into stacked blocks
+  (warmstart-ready). Spinful `electric_response.h5` (dH/de) is
+  rejected explicitly as not yet supported. SOC and non-collinear spin
+  remain unsupported.
+- **`spin_treatment` metadata (layout discriminator)** — spinful data
+  written by AimsPy always carries `info.json` `"spin_treatment":
+  "collinear"`. Spinful data *without* the field uses the legacy
+  four-quadrant `(2*n_rows, 2*n_cols)` complex layout (produced by
+  `ref/aims_to_deeph.py`, consumed by current DeepX 1.2.x/1.3.x) and is
+  **rejected on read with a clear error** — the compact layout is not
+  interchangeable with it. DeepX consumers adapt via this field: when
+  `spin_treatment == "collinear"`, the H-like shape mask becomes the
+  row-stacked `[m; m]` `(2n, n)` with `2*n_i*n_j` real values per pair;
+  the overlap path needs no change.
+- **Cross-spin warmstart guard** — `_apply_strategy` now rejects
+  REPLACE/ADD between a source whose `n_spin` differs from the live
+  initial Hamiltonian (previously, a spinless source replacing a
+  spin-polarized live matrix produced blocks that `to_aims_csr`
+  silently zero-filled into the Fortran initial Hamiltonian).
+- **Spinful dH/de runtime guards** — the `export_dHde` and `modify_dHde`
+  callbacks now raise for spin-polarized systems (`n_spin=2`) instead of
+  silently dropping (capture) or zeroing (modify) the beta channel of
+  the Fortran first-order Hamiltonian; the DFPT electric-response path
+  is reachable for `spin collinear` systems, so the guard matters.
+  `DeepHData.set_first_order_hamiltonian` likewise rejects spinful data
+  (previously it built an inconsistent 6x chunk layout). Stacked
+  (`n_spin=2`) dH/de matrices are also rejected — by
+  `DeepHData.from_aimspy(first_order_hamiltonian=...)` and
+  `set_first_order_hamiltonian` on spinless data (previously they built
+  entries inconsistent with the 3x chunk layout, failing only at save
+  time).
+- `tests/unit/test_matrix_spin.py` (18 tests),
+  `tests/unit/test_deeph_spinful.py` (32 tests), and
+  `tests/unit/test_modify_callback.py` (7 tests — the `modify_h0`
+  callback chain and the dHde spinful guards called directly, without
+  Fortran).
+- **Spinful integration tests** — `tests/data/MoS2_spin/` (MoS2 with
+  `spin collinear`, initial moment 0.5) plus two MPI integration scripts:
+  `tests/test_spin_export.py` (spinful SCF → DeepH export, cross-validated
+  against the FHI-aims per-channel references `rs_hamiltonian_up.out` /
+  `rs_hamiltonian_dn.out` at machine precision, on-disk contract checks)
+  and `tests/test_spin_warmstart.py` (REPLACE direct/deferred and ADD
+  converge to the baseline two-channel Hamiltonian; SCF iterations drop
+  20 → 2; a spinless source on the spin-polarized system raises
+  `AimspyCallbackError`). Run via `make test-spin-export` /
+  `make test-spin-warmstart` (or `make test-spin`).
+
+### Changed
+
+- `DeepHData.from_directory` no longer rejects `"spinful": true`
+  directories (replaced by full read support with layout validation).
+
 ## [0.2.1] - 2026-09-01
 
 ### Added

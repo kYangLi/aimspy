@@ -3,7 +3,7 @@
         test-all test-memory-loop test-dHde-capture test-dHde-inject-direct \
         test-dHde-inject-defer test-dHde run-from-scratch run-continue-calc run-example \
         test-grid-data-capture test-basis-export test-basis-callback-paths \
-        test-observables \
+        test-observables test-spin-export test-spin-warmstart test-spin \
         build lint help patch
 
 VENV := .venv
@@ -31,6 +31,9 @@ help:
 	@echo "  test-basis-export     Run NAO basis export test (MoS2_LDA)"
 	@echo "  test-basis-callback-paths  Run basis callback registration-semantics test (MoS2_LDA)"
 	@echo "  test-observables     Run final energy/force/analytical-stress API test"
+	@echo "  test-spin-export     Run spinful SCF + DeepH export (MoS2_spin, produces deeph_spin_out/)"
+	@echo "  test-spin-warmstart  Run spinful warmstart REPLACE/ADD + cross-spin guard (needs deeph_spin_out/)"
+	@echo "  test-spin            Run both spinful tests in order"
 	@echo "  test-integration     Run all integration tests in dependency order"
 	@echo "  test-memory-loop     Run 15-cycle memory pressure test (capture_overlap=True)"
 	@echo "  test-all             Run unit + integration tests"
@@ -119,10 +122,19 @@ test-basis-callback-paths:
 test-observables:
 	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_observables.py
 
+test-spin-export:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_spin_export.py
+
+test-spin-warmstart:
+	ulimit -s unlimited && mpiexec -np $${AIMSPY_TEST_NPROC:-8} python tests/test_spin_warmstart.py
+
+test-spin: test-spin-export test-spin-warmstart
+
 test-integration: test-baseline test-export-deeph test-warmstart \
                   test-capture-overlap test-regression test-strategies test-dHde \
                   test-dHde-serial test-callback-reset test-grid-data-capture \
-                  test-basis-export test-basis-callback-paths test-observables
+                  test-basis-export test-basis-callback-paths test-observables \
+                  test-spin
 
 test-all: test test-integration
 
@@ -155,10 +167,12 @@ clean:
 	rm -f aimspy/_aims*.so aimspy/_aims*.pyd 2>/dev/null || true
 	rm -rf tests/data/MoS2/deeph_out tests/data/MoS2/_regression_* 2>/dev/null || true
 	rm -rf tests/data/MoS2_DFPT/deeph_dHde_out 2>/dev/null || true
+	rm -rf tests/data/MoS2_spin/deeph_spin_out 2>/dev/null || true
 	rm -f tests/data/MoS2/*.out 2>/dev/null || true
 	rm -f tests/data/MoS2_DFPT/*.out 2>/dev/null || true
 	rm -f tests/data/MoS2_DFPT/*.dat 2>/dev/null || true
 	rm -f tests/data/MoS2_DFPT/*.npy 2>/dev/null || true
+	rm -f tests/data/MoS2_spin/*.out 2>/dev/null || true
 	rm -rf examples/*/deeph_data 2>/dev/null || true
 	rm -f examples/*/*.out 2>/dev/null || true
 	@echo "Clean complete!"

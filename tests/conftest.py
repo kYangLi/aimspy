@@ -24,4 +24,6 @@ collect_ignore = [
     "test_basis_export.py",
     "test_basis_callback_paths.py",
     "test_observables.py",
+    "test_spin_export.py",
+    "test_spin_warmstart.py",
 ]

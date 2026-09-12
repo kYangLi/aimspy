@@ -97,7 +97,7 @@ cfg = CalculatorConfig(
 )
 
 calc = Calculator(cfg)
-calc.init()
+calc.init(work_dir=DATA_DIR)
 # basis_data should be available immediately after init() (no calc() needed)
 
 # ==========================================================================

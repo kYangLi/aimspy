@@ -14,6 +14,11 @@ Conventions
 - *Parity*: wiki/DeepH convention (``phase_i * phase_j`` already applied).
 - *Units*: Hartree.
 - *Hermitian partners*: both ``(R,i,j)`` and ``(-R,j,i)`` stored.
+- *Spin*: ``n_spin=1`` blocks are ``(n_orb_i, n_orb_j)``.  ``n_spin=2``
+  (collinear) blocks are stacked ``(2*n_orb_i, n_orb_j)``: the alpha
+  (spin-up) channel occupies rows ``[0, n_orb_i)`` and the beta
+  (spin-down) channel rows ``[n_orb_i, 2*n_orb_i)``.  Spin-independent
+  matrices (the overlap) always use ``n_spin=1`` blocks.
 """
 
 from __future__ import annotations
@@ -114,9 +119,15 @@ class AimspyMatrix:
         - Orbital order within each atom is aims native.
         - Parity = wiki/DeepH (phase already applied).
         - Units = Hartree.
+
+    Block shape:
+        - ``n_spin == 1``: ``(n_orb_i, n_orb_j)``.
+        - ``n_spin == 2`` (collinear): ``(2*n_orb_i, n_orb_j)`` with the
+          alpha (spin-up) channel in rows ``[0, n_orb_i)`` and the beta
+          (spin-down) channel in rows ``[n_orb_i, 2*n_orb_i)``.
     """
 
-    blocks: Dict[Tuple[int, ...], np.ndarray]  # key -> (n_orb_i, n_orb_j)
+    blocks: Dict[Tuple[int, ...], np.ndarray]  # key -> (n_spin*n_orb_i, n_orb_j)
     n_spin: int = 1
 
     # ----------------------------------------------------------------
@@ -137,22 +148,36 @@ class AimspyMatrix:
         3. Apply wiki parity: ``v *= phase_i * phase_j``.
         4. Store block[orb_i, orb_j] and its Hermitian partner.
 
+        The number of spin channels is inferred from ``h0.shape[0]`` (the
+        data), not from ``csr_descr.n_spin`` (the system): the spin-independent
+        overlap arrives as ``(1, n_ham_size)`` even for spin-polarized
+        systems and yields standard ``n_spin=1`` blocks, while the
+        Hamiltonian arrives as ``(2, n_ham_size)`` and yields stacked
+        ``(2*n_orb_i, n_orb_j)`` blocks (alpha rows first, beta rows second).
+
         Raises
         ------
         AimspyError
-            If ``csr_descr.n_spin != 1`` (spin-polarized data is not yet
-            supported; only spin channel 0 would be read).
+            If ``h0.shape[0]`` is neither 1 nor 2, or if 2-channel data
+            is combined with a descriptor whose ``n_spin != 2``.
         """
-        if csr_descr.n_spin != 1:
+        n_spin = int(h0.shape[0])
+        if n_spin not in (1, 2):
             from ._exceptions import AimspyError
 
             raise AimspyError(
-                f"from_aims_csr: spin-polarized data (n_spin="
-                f"{csr_descr.n_spin}) is not yet supported; n_spin=1 only"
+                f"from_aims_csr: unsupported n_spin={n_spin}; expected 1 or 2"
+            )
+        if n_spin == 2 and csr_descr.n_spin != 2:
+            from ._exceptions import AimspyError
+
+            raise AimspyError(
+                f"from_aims_csr: 2-channel data (h0.shape[0]=2) but "
+                f"csr_descr.n_spin={csr_descr.n_spin}"
             )
         phase = structure.phase_factor
         subidx = structure.basis_subidx
-        opa = structure.orbit_per_atom
+        opa = [int(v) for v in structure.orbit_per_atom]
         blocks: dict = {}
 
         n_cells_loop = csr_descr.n_cells - 1  # skip sentinel
@@ -172,6 +197,7 @@ class AimspyMatrix:
                 atom_i = int(structure.basis_atom[ib_row])
                 orb_i = int(subidx[ib_row])
                 pi = int(phase[ib_row])
+                oi = opa[atom_i]
 
                 for k in range(start - 1, end):
                     if k >= n_ham:
@@ -180,40 +206,64 @@ class AimspyMatrix:
                     atom_j = int(structure.basis_atom[ib_col])
                     orb_j = int(subidx[ib_col])
                     pj = int(phase[ib_col])
+                    oj = opa[atom_j]
 
                     key = (R0, R1, R2, atom_i, atom_j)
                     rev_key = (-R0, -R1, -R2, atom_j, atom_i)
 
                     if key not in blocks:
-                        blocks[key] = np.zeros(
-                            (opa[atom_i], opa[atom_j]), dtype=np.float64
-                        )
+                        blocks[key] = np.zeros((n_spin * oi, oj), dtype=np.float64)
                     if rev_key not in blocks:
-                        blocks[rev_key] = np.zeros(
-                            (opa[atom_j], opa[atom_i]), dtype=np.float64
-                        )
-
-                    v = h0[0, k] * pi * pj  # apply parity
-                    blocks[key][orb_i, orb_j] = v
+                        blocks[rev_key] = np.zeros((n_spin * oj, oi), dtype=np.float64)
 
                     # Hermitian partner: write if unset, else verify consistency.
                     # CSR stores upper-triangle only, so the reverse entry
                     # (j,i) at -R should already equal (i,j) at R. If it was
                     # previously written (abs > 1e-12), check agreement within
                     # 1e-11 — well above double round-off (~1e-13 for |v|~1e3).
-                    existing_rev = blocks[rev_key][orb_j, orb_i]
-                    if abs(existing_rev) <= 1e-12:
-                        blocks[rev_key][orb_j, orb_i] = v
-                    elif abs(existing_rev - v) > 1e-11:
-                        from ._exceptions import AimspyError
+                    if n_spin == 1:
+                        v = h0[0, k] * pi * pj  # apply parity
+                        blocks[key][orb_i, orb_j] = v
 
-                        raise AimspyError(
-                            f"Hermitian check failed at R=({R0},{R1},{R2}), "
-                            f"atom=({atom_i},{atom_j}), orb=({orb_i},{orb_j}): "
-                            f"existing={existing_rev:.6e}, new={v:.6e}"
-                        )
+                        existing_rev = blocks[rev_key][orb_j, orb_i]
+                        if abs(existing_rev) <= 1e-12:
+                            blocks[rev_key][orb_j, orb_i] = v
+                        elif abs(existing_rev - v) > 1e-11:
+                            from ._exceptions import AimspyError
 
-        return cls(blocks=blocks, n_spin=int(h0.shape[0]))
+                            raise AimspyError(
+                                f"Hermitian check failed at R=({R0},{R1},{R2}), "
+                                f"atom=({atom_i},{atom_j}), orb=({orb_i},{orb_j}): "
+                                f"existing={existing_rev:.6e}, new={v:.6e}"
+                            )
+                    else:
+                        # n_spin == 2 — stacked alpha/beta channels.  Both
+                        # channels are always written together, so probing the
+                        # beta row is sufficient to detect a prior write.
+                        # Known weakening (same "unwritten" heuristic as the
+                        # spinless path): beta-channel values that are exactly
+                        # zero skip the alpha-channel consistency check; the
+                        # last write still wins, so blocks stay Hermitian.
+                        v_up = h0[0, k] * pi * pj
+                        v_dn = h0[1, k] * pi * pj
+                        blocks[key][orb_i, orb_j] = v_up
+                        blocks[key][orb_i + oi, orb_j] = v_dn
+
+                        existing_rev = blocks[rev_key][orb_j + oj, orb_i]
+                        if abs(existing_rev) <= 1e-12:
+                            blocks[rev_key][orb_j, orb_i] = v_up
+                            blocks[rev_key][orb_j + oj, orb_i] = v_dn
+                        elif abs(existing_rev - v_dn) > 1e-11:
+                            from ._exceptions import AimspyError
+
+                            raise AimspyError(
+                                f"Hermitian check failed (spin channel 1) at "
+                                f"R=({R0},{R1},{R2}), "
+                                f"atom=({atom_i},{atom_j}), orb=({orb_i},{orb_j}): "
+                                f"existing={existing_rev:.6e}, new={v_dn:.6e}"
+                            )
+
+        return cls(blocks=blocks, n_spin=n_spin)
 
     def to_aims_csr(
         self,
@@ -229,24 +279,39 @@ class AimspyMatrix:
         4. Undo parity: ``v *= phase_i * phase_j`` (self‑inverse).
         5. Return ``(n_spin, n_ham_size)`` C‑contiguous, ready to memmove.
 
+        For stacked (``n_spin == 2``) blocks, the alpha row
+        ``[orb_i, orb_j]`` and the beta row ``[orb_i + n_orb_i, orb_j]``
+        are unpacked into ``out[0, k]`` and ``out[1, k]``.
+
+        Note the asymmetry with :meth:`from_aims_csr`: *reading* may be
+        spin-independent (``(1, n_ham_size)`` overlap data combined with
+        an ``n_spin == 2`` descriptor is accepted and yields standard
+        blocks), but *writing* requires an exact ``n_spin`` match — a
+        non-stacked matrix written through a spinful descriptor would
+        produce a partially-zero Hamiltonian (not a valid non-polarized
+        guess, which would require both channels equal), so it is
+        rejected.
+
         Raises
         ------
         AimspyError
-            If ``csr_descr.n_spin != 1`` (spin-polarized data is not yet
-            supported; only spin channel 0 would be written).
+            If the matrix ``n_spin`` does not match
+            ``csr_descr.n_spin``.
         """
-        if csr_descr.n_spin != 1:
+        n_spin = csr_descr.n_spin
+        if self.n_spin != n_spin:
             from ._exceptions import AimspyError
 
             raise AimspyError(
-                f"to_aims_csr: spin-polarized data (n_spin="
-                f"{csr_descr.n_spin}) is not yet supported; n_spin=1 only"
+                f"to_aims_csr: matrix n_spin={self.n_spin} does not match "
+                f"descriptor n_spin={n_spin}"
             )
+        stacked = self.n_spin == 2
         phase = structure.phase_factor
         subidx = structure.basis_subidx
+        opa = [int(v) for v in structure.orbit_per_atom]
 
         n_ham = csr_descr.n_ham_size
-        n_spin = csr_descr.n_spin
         out = np.zeros((n_spin, n_ham), dtype=np.float64)
         n_cells_loop = csr_descr.n_cells - 1
 
@@ -264,6 +329,7 @@ class AimspyMatrix:
                 atom_i = int(structure.basis_atom[ib_row])
                 orb_i = int(subidx[ib_row])
                 pi = int(phase[ib_row])
+                oi = opa[atom_i]
 
                 for k in range(start - 1, end):
                     if k >= n_ham:
@@ -272,18 +338,35 @@ class AimspyMatrix:
                     atom_j = int(structure.basis_atom[ib_col])
                     orb_j = int(subidx[ib_col])
                     pj = int(phase[ib_col])
+                    oj = opa[atom_j]
 
                     key = (R0, R1, R2, atom_i, atom_j)
                     blk = self.blocks.get(key)
                     if blk is not None:
-                        if orb_i < blk.shape[0] and orb_j < blk.shape[1]:
+                        if stacked:
+                            if orb_i + oi < blk.shape[0] and orb_j < blk.shape[1]:
+                                val_up = blk[orb_i, orb_j]
+                                val_dn = blk[orb_i + oi, orb_j]
+                            else:
+                                val_up = val_dn = 0.0
+                        elif orb_i < blk.shape[0] and orb_j < blk.shape[1]:
                             val = blk[orb_i, orb_j]
                         else:
                             val = 0.0
                     else:
                         rev_key = (-R0, -R1, -R2, atom_j, atom_i)
                         blk = self.blocks.get(rev_key)
-                        if (
+                        if stacked:
+                            if (
+                                blk is not None
+                                and orb_j + oj < blk.shape[0]
+                                and orb_i < blk.shape[1]
+                            ):
+                                val_up = blk[orb_j, orb_i]  # Hermitian fallback
+                                val_dn = blk[orb_j + oj, orb_i]
+                            else:
+                                val_up = val_dn = 0.0
+                        elif (
                             blk is not None
                             and orb_j < blk.shape[0]
                             and orb_i < blk.shape[1]
@@ -292,8 +375,12 @@ class AimspyMatrix:
                         else:
                             val = 0.0
 
-                    val *= pi * pj  # undo parity
-                    out[0, k] = val
+                    pp = pi * pj  # undo parity (self-inverse)
+                    if stacked:
+                        out[0, k] = val_up * pp
+                        out[1, k] = val_dn * pp
+                    else:
+                        out[0, k] = val * pp
 
         return out
 

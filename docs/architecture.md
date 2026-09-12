@@ -165,7 +165,7 @@ a geometry-update mechanism (post-processing only on the second call).
 | Orbital parity | wiki/DeepH parity (−1 iff m>0 and m odd), self-inverse, applied in the matrix layer |
 | dH/de directions | DeepH order `[y, z, x]` (real spherical harmonics m = −1, 0, +1) ↔ Cartesian `[x, y, z]` |
 | Index base | Fortran 1-based → Python 0-based everywhere (`_view_i(...)` − 1 at the boundary); GridData index arrays likewise |
-| Spin | `n_spin = 1` only — enforced at CSR conversion, DeepH read, and DeepH write |
+| Spin | collinear `n_spin=2` supported (stacked blocks, alpha rows first); `to_aims_csr` enforces an exact matrix/descriptor `n_spin` match; SOC / non-collinear rejected |
 | Splines | integer grid-index axis: `i_r = 1 + ln(r/r_grid_min)/ln(r_grid_inc)`, snap ±1e-10, clip `[1, n_g−1]`, Horner `c1 + t(c2 + t(c3 + t·c4))`, zero outside `[r_grid_min, outer_radius]` |
 | GridData `rho0` | free-atom density; the 4π factor of aims' `free_rho_superpos` is removed at import; `delta_rho` per spin channel references `0.5·rho_free` |
 | `vks` | scalar part only (exact for LDA; GGA's `4·xc_gradient_deriv` vector term is not exported) |
@@ -236,9 +236,9 @@ nulls SimpleNamespace internals).
 | Spline export buffers replicated on every rank (no root-only path) | deliberate — Python registers/captures on all ranks |
 | Rank-divergent callback registration → MPI hang | inherent to the all-ranks trigger design; inherited pattern |
 | In-process relaxation: matrix callbacks fire on the first geometry only; `c_overlap` stale from step 2 | supported pattern is one Calculator per geometry |
-| `AimspyMatrix` / DeepH path is `n_spin=1` only | spin-polarized support not implemented |
+| SOC / non-collinear spin not supported | collinear (`n_spin=2`) implemented; the legacy four-quadrant spinful layout is rejected on read |
 | dH/de callbacks require periodic systems (`n_periodic > 0`) | aperiodic electric response uses dense H1 and never triggers them |
-| `export_ovlp` hardcodes `n_spin=1` in the callback argument | consistent with the n_spin=1 limitation |
+| `export_ovlp` hardcodes `n_spin=1` in the callback argument | the overlap is spin-independent — a single channel is correct by design |
 | matplotlib/scipy undeclared in core dependencies | available via the `[viz]` extra; CLI fails with an install hint |
 | Restart file pre-empts warmstart injection (`keep_restart_info` + existing restart) | aims-native behavior, documented in initialize_scf |
 
