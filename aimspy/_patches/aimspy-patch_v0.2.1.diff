@@ -51,7 +51,7 @@ index bb052399..68afa156 100644
  if (NOT USE_iPI)
    target_sources(aims5 PRIVATE ipi_stubs.f90)
 diff --git a/src/DFPT_main/DFPT_module.f90 b/src/DFPT_main/DFPT_module.f90
-index 99810d70..960eaa1f 100644
+index 99810d70..519b80dc 100644
 --- a/src/DFPT_main/DFPT_module.f90
 +++ b/src/DFPT_main/DFPT_module.f90
 @@ -240,6 +240,9 @@ use scalapack_wrapper!, only: mxld, mxcol, my_k_point, eigenvec, my_row, my_col
@@ -72,7 +72,49 @@ index 99810d70..960eaa1f 100644
  ! --------
  
  
-@@ -1090,6 +1094,67 @@ subroutine DFPT_cpscf(converged_cpscf,&
+@@ -693,7 +697,7 @@ subroutine DFPT_allocation()
+         allocate(DFPT_first_order_H(n_dfpt_coords,atom_dim,n_basis,n_basis,1,n_spin))
+         allocate(DFPT_first_order_density_matrix(n_dfpt_coords, atom_dim, n_basis,n_basis,n_spin))
+         allocate(DFPT_old_first_order_density_matrix(n_dfpt_coords, atom_dim, n_basis,n_basis,n_spin))
+-        allocate(DFPT_first_order_U(n_dfpt_coords,atom_dim,n_basis,n_basis,1,n_spin))
++        allocate(DFPT_first_order_U(n_dfpt_coords,atom_dim,n_states,n_states,1,n_spin))
+         call aims_allocate(DFPT_first_order_E,n_dfpt_coords,atom_dim, n_states, 1, n_spin,'DFPT_first_order_E')
+         DFPT_first_order_U = 0.d0
+         DFPT_first_order_E = 0.d0
+@@ -715,13 +719,21 @@ subroutine DFPT_allocation()
+ 
+         if (real_eigenvectors) then
+            allocate(DFPT_first_order_H(n_dfpt_coords,atom_dim,n_basis,n_basis,n_k_points_task,n_spin))
+-           allocate(DFPT_first_order_U(n_dfpt_coords,atom_dim,n_basis,n_basis,n_k_points_task,n_spin))
++           if (nuclear_response) then
++              allocate(DFPT_first_order_U(n_dfpt_coords,atom_dim,n_basis,n_basis,n_k_points_task,n_spin))
++           else
++              allocate(DFPT_first_order_U(n_dfpt_coords,atom_dim,n_states,n_states,n_k_points_task,n_spin))
++           endif
+            DFPT_first_order_H = 0.d0
+            DFPT_first_order_U = 0.d0
+ 
+         else
+            allocate(DFPT_first_order_H_complex(n_dfpt_coords,atom_dim,n_basis,n_basis,n_k_points_task,n_spin))
+-           allocate(DFPT_first_order_U_complex(n_dfpt_coords,atom_dim,n_basis,n_basis,n_k_points_task,n_spin))
++           if (nuclear_response) then
++              allocate(DFPT_first_order_U_complex(n_dfpt_coords,atom_dim,n_basis,n_basis,n_k_points_task,n_spin))
++           else
++              allocate(DFPT_first_order_U_complex(n_dfpt_coords,atom_dim,n_states,n_states,n_k_points_task,n_spin))
++           endif
+            DFPT_first_order_H_complex=(0.0d0,0.0d0)
+            DFPT_first_order_U_complex=(0.0d0,0.0d0)
+         endif
+@@ -792,7 +804,7 @@ subroutine DFPT_allocation()
+      allocate(DFPT_first_order_density_matrix(n_dfpt_coords, atom_dim, n_basis,n_basis,n_spin))
+      allocate(DFPT_old_first_order_density_matrix(n_dfpt_coords, atom_dim, n_basis,n_basis,n_spin)) !for scalapack nuclear response cluster
+      allocate(DFPT_first_order_H(n_dfpt_coords,atom_dim,n_basis,n_basis,1,n_spin))
+-     allocate(DFPT_first_order_U(n_dfpt_coords,atom_dim,n_basis,n_basis,1,n_spin)) !for scalapack nuclear response cluster
++     allocate(DFPT_first_order_U(n_dfpt_coords,atom_dim,n_states,n_states,1,n_spin)) !for scalapack nuclear response cluster
+      call aims_allocate(DFPT_first_order_E,n_dfpt_coords,atom_dim, n_states,n_k_points, n_spin,'DFPT_first_order_E')
+      DFPT_first_order_density_matrix = 0.d0
+      DFPT_old_first_order_density_matrix = 0.d0
+@@ -1090,6 +1102,67 @@ subroutine DFPT_cpscf(converged_cpscf,&
           write (info_str,'(A,2X)') &
           "Calculating first order coefficient matrix for initial guess"
           call localorb_info(info_str,use_unit,'(A)')
@@ -140,7 +182,7 @@ index 99810d70..960eaa1f 100644
           call DFPT_calc_U1(Omega_MO,Omega_MO_scalapack,Omega_MO_complex_scalapack)
        else
           call DFPT_calc_U1()
-@@ -1168,6 +1233,15 @@ subroutine DFPT_cpscf(converged_cpscf,&
+@@ -1168,6 +1241,15 @@ subroutine DFPT_cpscf(converged_cpscf,&
           !Write converged first order matrices to files
           if (output_dfpt_first_order_matrices) call DFPT_write_matrices
  
@@ -156,6 +198,232 @@ index 99810d70..960eaa1f 100644
           if (dfpt_forces_on) then
              write(info_str,'(2X,A)') 'Recalculating V1 with forces on'
              call localorb_info(info_str, use_unit,'(A)',OL_norm)
+@@ -1657,12 +1739,12 @@ subroutine DFPT_calc_DM1(cpscf_number_of_loops)
+                            if (real_eigenvectors) then
+                               call construct_sparse_matrix_from_scalapack(DFPT_first_order_density_matrix_scalapack(coord_counter,atom_counter,:,:,i_spin), &
+                                  DFPT_first_order_density_matrix_complex_scalapack(1,1,:,:,1), & !dummy
+-                                 DFPT_first_order_density_matrix_sparse(coord_counter,atom_counter,:,i_spin))
++                                 DFPT_first_order_density_matrix_sparse(coord_counter,atom_counter,:,i_spin), .true.)
+                            else
+                               !write(*,*) "skip building sparse"
+                               call construct_sparse_matrix_from_scalapack(DFPT_first_order_density_matrix_scalapack(1,1,:,:,1), & !dummy
+                                 DFPT_first_order_density_matrix_complex_scalapack(coord_counter,atom_counter,:,:,i_spin), &
+-                                DFPT_first_order_density_matrix_sparse(coord_counter,atom_counter,:,i_spin))
++                                DFPT_first_order_density_matrix_sparse(coord_counter,atom_counter,:,i_spin), nuclear_response)
+                            endif !eigenvectors
+                            call sync_vector(DFPT_first_order_density_matrix_sparse(coord_counter,atom_counter,:,i_spin), n_hamiltonian_matrix_size)
+                            !if(myid==0) write(*,*) 'dm1_sparse_premix',  DFPT_first_order_density_matrix_sparse(coord_counter,atom_counter,:,i_spin)
+diff --git a/src/DFPT_main/evaluate_DM1.f90 b/src/DFPT_main/evaluate_DM1.f90
+index 484dfdcc..2c711b9a 100644
+--- a/src/DFPT_main/evaluate_DM1.f90
++++ b/src/DFPT_main/evaluate_DM1.f90
+@@ -1265,7 +1265,7 @@ subroutine evaluate_DM1_doublesum(calculate_S1_term, &
+ 
+     real*8, dimension(n_basis, n_basis), intent(IN) :: first_order_S
+ 
+-    real*8, dimension(n_basis, n_basis, n_spin), intent(IN) :: first_order_U
++    real*8, dimension(n_states, n_states, n_spin), intent(IN) :: first_order_U
+ 
+     real*8, dimension(n_basis,n_basis, n_spin),intent(OUT) :: first_order_density_matrix
+ 
+@@ -1475,8 +1475,8 @@ subroutine evaluate_DM1_doublesum_sparse(calculate_S1_term, &
+         if (real_eigenvectors) then
+             allocate(temp_oo(n_basis,n_basis)) 
+             allocate(temp_real(n_basis,n_basis))
+-            allocate(temp_U_term(n_basis,n_basis))
+-            allocate(temp_U_term2(n_basis,n_basis))
++            allocate(temp_U_term(n_states,n_states))
++            allocate(temp_U_term2(n_basis,n_states))
+             allocate(temp_eigenvector_occ(n_basis,n_states))
+             allocate(temp_1(n_basis,n_basis))
+             allocate(temp_2(n_basis,n_basis))
+@@ -1605,9 +1605,9 @@ subroutine evaluate_DM1_doublesum_sparse(calculate_S1_term, &
+ 
+                         CALL dgemm("N","N",n_basis,n_states,n_states,&
+                             ! 1.0d0, KS_eigen_times_occnumber, n_basis,temp_U_term, n_basis,&
+-                            1.0d0, KS_eigenvector(1:n_basis,1:n_states,i_spin,i_k_task), n_states,&
++                            1.0d0, KS_eigenvector(1:n_basis,1:n_states,i_spin,i_k_task), n_basis,&
+                             ! first_order_U(1:n_states,1:n_states,i_spin), n_basis,&
+-                            temp_U_term(1:n_states,1:n_states), n_basis,&
++                            temp_U_term(1:n_states,1:n_states), n_states,&
+                             0.0d0,temp_U_term2,n_basis)
+                 
+                 
+@@ -1619,9 +1619,9 @@ subroutine evaluate_DM1_doublesum_sparse(calculate_S1_term, &
+ 
+                         CALL dgemm("N","T",n_basis,n_states,n_states,&
+                             ! 1.0d0, KS_eigen_times_occnumber, n_basis,temp_U_term, n_basis,&
+-                            1.0d0, KS_eigenvector(1:n_basis,1:n_states,i_spin,i_k_task), n_states,&
++                            1.0d0, KS_eigenvector(1:n_basis,1:n_states,i_spin,i_k_task), n_basis,&
+                             ! first_order_U(1:n_states,1:n_states,i_spin), n_basis,&
+-                            temp_U_term(1:n_states,1:n_states), n_basis,&
++                            temp_U_term(1:n_states,1:n_states), n_states,&
+                             0.0d0,temp_U_term2,n_basis)
+                 
+                 
+@@ -1758,7 +1758,7 @@ subroutine evaluate_DM1_doublesum_sparse(calculate_S1_term, &
+                             temp_1_complex(1:n_basis,1:n_basis)=(0.0d0,0.0d0)
+                             CALL zgemm("N","N",n_basis,n_states,n_states,&
+                                     one, KS_eigenvector_complex(1:n_basis,1:n_states,i_spin,i_k_task), n_basis, & 
+-                                    temp_U1_complex(1:n_states,1:n_states), n_basis,&
++                                    temp_U1_complex(1:n_states,1:n_states), n_states,&
+                                     zero,temp_1_complex,n_basis)
+                             CALL zgemm("N","C",n_basis,n_basis, n_states, &
+                                     one, temp_1_complex, n_basis, &
+@@ -1768,9 +1768,9 @@ subroutine evaluate_DM1_doublesum_sparse(calculate_S1_term, &
+                             temp_1_complex(1:n_basis,1:n_basis)=(0.0d0,0.0d0)
+                             CALL zgemm("N","C",n_basis,n_states,n_states,&
+                                     one, KS_eigenvector_complex(1:n_basis,1:n_states,i_spin,i_k_task), n_basis, & 
+-                                    temp_U1_complex(1:n_states,1:n_states), n_basis,&
++                                    temp_U1_complex(1:n_states,1:n_states), n_states,&
+                                     zero,temp_1_complex,n_basis)
+-                            CALL zgemm("N","C",n_basis,n_states,n_states,&
++                            CALL zgemm("N","C",n_basis,n_basis,n_states,&
+                                     one, temp_1_complex, n_basis, & 
+                                     KS_eigenvector_complex(1:n_basis,1:n_states,i_spin,i_k_task), n_basis,&
+                                     one,temp_dm1_complex,n_basis)  
+@@ -1831,11 +1831,19 @@ subroutine evaluate_DM1_doublesum_sparse(calculate_S1_term, &
+                                             * k_weights(i_k_point)
+                             else
+ 
+-                                first_order_density_matrix_sparse(i_index,i_spin)= &
+-                                first_order_density_matrix_sparse(i_index,i_spin)  &
+-                                        + dble( (temp_dm1_complex(i_basis,j_basis) ) &
+-                                            * dconjg(k_phase(i_cell,i_k_point) ) ) &  
++                                if (calculate_S1_term) then
++                                    first_order_density_matrix_sparse(i_index,i_spin)= &
++                                    first_order_density_matrix_sparse(i_index,i_spin) &
++                                        + dble(temp_dm1_complex(i_basis,j_basis) &
++                                            * dconjg(k_phase(i_cell,i_k_point))) &
+                                             * k_weights(i_k_point)
++                                else
++                                    first_order_density_matrix_sparse(i_index,i_spin)= &
++                                    first_order_density_matrix_sparse(i_index,i_spin) &
++                                        + dble(temp_dm1_complex(i_basis,j_basis) &
++                                            * k_phase(i_cell,i_k_point)) &
++                                            * k_weights(i_k_point)
++                                endif
+                             endif
+ 
+                         end do
+diff --git a/src/DFPT_main/evaluate_U1.f90 b/src/DFPT_main/evaluate_U1.f90
+index 34590b01..2c378156 100644
+--- a/src/DFPT_main/evaluate_U1.f90
++++ b/src/DFPT_main/evaluate_U1.f90
+@@ -179,7 +179,7 @@ subroutine evaluate_U1_vscf( &
+     real*8, dimension(n_basis, n_basis, n_spin), intent(IN) :: first_order_H
+     real*8, dimension(n_basis, n_basis), intent(IN) :: first_order_S
+ 
+-    real*8, dimension(n_basis, n_basis, n_spin), intent(OUT) :: first_order_U
++    real*8, dimension(n_states, n_states, n_spin), intent(OUT) :: first_order_U
+     real*8, dimension(n_basis, n_spin, 1), intent(OUT) ::  first_order_E
+     real*8, intent(OUT) :: first_order_chem_pot
+     ! real*8, dimension(n_basis, n_spin,1) ::  first_order_E
+@@ -2388,6 +2388,8 @@ subroutine evaluate_U1_electric_scalapack( &
+         
+                     i_global_row = my_row(i_local_row)
+                     i_global_col = my_col(i_local_col)
++                    if (i_global_row > n_states_k(my_k_point)) cycle
++                    if (i_global_col > n_states_k(my_k_point)) cycle
+ 
+                     if (i_global_row==i_global_col) then
+                         first_order_E(i_global_row,i_spin,my_k_point) = tmp_H1(i_local_row,i_local_col,i_spin)
+@@ -2455,6 +2457,8 @@ subroutine evaluate_U1_electric_scalapack( &
+         
+                     i_global_row = my_row(i_local_row)
+                     i_global_col = my_col(i_local_col)
++                    if (i_global_row > n_states_k(my_k_point)) cycle
++                    if (i_global_col > n_states_k(my_k_point)) cycle
+ 
+                     if (i_global_row==i_global_col) then
+                         first_order_E(i_global_row,i_spin,my_k_point) = real(tmp_H1_complex(i_local_row,i_local_col,i_spin))
+@@ -2500,6 +2504,8 @@ subroutine evaluate_U1_electric_scalapack( &
+         
+                     i_global_row = my_row(i_local_row)
+                     i_global_col = my_col(i_local_col)
++                    if (i_global_row > n_states_k(my_k_point)) cycle
++                    if (i_global_col > n_states_k(my_k_point)) cycle
+ 
+ 
+                     
+@@ -2554,6 +2560,8 @@ subroutine evaluate_U1_electric_scalapack( &
+             
+                         i_global_row = my_row(i_local_row)
+                         i_global_col = my_col(i_local_col)
++                        if (i_global_row > n_states_k(my_k_point)) cycle
++                        if (i_global_col > n_states_k(my_k_point)) cycle
+     
+     
+                         if (i_global_row > homo_state) cycle
+@@ -2600,6 +2608,8 @@ subroutine evaluate_U1_electric_scalapack( &
+         
+                     i_global_row = my_row(i_local_row)
+                     i_global_col = my_col(i_local_col)
++                    if (i_global_row > n_states_k(my_k_point)) cycle
++                    if (i_global_col > n_states_k(my_k_point)) cycle
+ 
+ 
+                     if (i_global_row > homo_state) cycle
+diff --git a/src/DFPT_main/matrix_constructions.f90 b/src/DFPT_main/matrix_constructions.f90
+index c3b273a2..a0fa55be 100644
+--- a/src/DFPT_main/matrix_constructions.f90
++++ b/src/DFPT_main/matrix_constructions.f90
+@@ -489,7 +489,7 @@ subroutine construct_scalapack_matrix_from_sparse_no_symmetry(&
+ end subroutine construct_scalapack_matrix_from_sparse_no_symmetry
+ 
+ subroutine construct_sparse_matrix_from_scalapack( &
+-   scalapack_matrix, scalapack_matrix_complex, sparse_matrix)
++   scalapack_matrix, scalapack_matrix_complex, sparse_matrix, conjugate_inverse_phase)
+ 
+    !  PURPOSE
+    !    Gets a sparse matrix array from ScaLAPACK
+@@ -505,6 +505,7 @@ subroutine construct_sparse_matrix_from_scalapack( &
+    implicit none
+    !  ARGUMENTS
+    real*8, intent(OUT) :: sparse_matrix(n_hamiltonian_matrix_size)
++   logical, intent(IN) :: conjugate_inverse_phase
+ 
+    !real eigenvectors
+    real*8, dimension(mxld,mxcol), intent(IN) :: scalapack_matrix
+@@ -521,6 +522,7 @@ subroutine construct_sparse_matrix_from_scalapack( &
+    !  SOURCE
+ 
+    integer :: i_cell, i_bas1, i_bas2, i_index, lr, lc
++   complex*16 :: inverse_phase
+ 
+    character*200 :: info_str
+ 
+@@ -533,6 +535,8 @@ subroutine construct_sparse_matrix_from_scalapack( &
+    sparse_matrix = 0.0d0
+ 
+    do i_cell = 1,n_cells_in_hamiltonian-1
++      inverse_phase = k_phase(i_cell,my_k_point)
++      if (conjugate_inverse_phase) inverse_phase = dconjg(inverse_phase)
+       do i_bas1 = 1, n_basis
+          lr = l_row(i_bas1) !
+          if(lr==0) cycle    ! skip if not local
+@@ -548,12 +552,12 @@ subroutine construct_sparse_matrix_from_scalapack( &
+             if (real_eigenvectors) then
+                sparse_matrix(i_index) = &
+                   sparse_matrix(i_index) + &
+-                  scalapack_matrix(lr,lc)*dble(k_phase(i_cell,my_k_point))
++                  scalapack_matrix(lr,lc)*dble(inverse_phase)
+             else
+                sparse_matrix(i_index) = &
+                   sparse_matrix(i_index) + &
+                   dble( scalapack_matrix_complex(lr,lc)   &
+-                  * dconjg(k_phase(i_cell,my_k_point)) )
++                  * inverse_phase )
+ 
+ 
+             endif
+@@ -704,4 +708,4 @@ subroutine construct_dense_matrix_from_scalapack( &
+       call sync_vector_complex(dense_matrix_complex, size(dense_matrix_complex))
+    endif
+ 
+-end subroutine construct_dense_matrix_from_scalapack
+\ No newline at end of file
++end subroutine construct_dense_matrix_from_scalapack
 diff --git a/src/aimspy_api/CMakeLists.txt b/src/aimspy_api/CMakeLists.txt
 new file mode 100644
 index 00000000..b4fc26fd
@@ -2313,6 +2581,107 @@ index 40dc3eb6..292b9fd0 100644
 +        if (.not.converged_cpscf.and..not.(postprocess_anyway==PP_ANYWAY_EVERYTHING)) then
              call aims_stop('CPSCF not converged')
          endif
+ 
+diff --git a/src/electric_response/evaluate_omega.f90 b/src/electric_response/evaluate_omega.f90
+index 2aa36d57..b90c94dc 100644
+--- a/src/electric_response/evaluate_omega.f90
++++ b/src/electric_response/evaluate_omega.f90
+@@ -75,9 +75,10 @@ subroutine evaluate_omega( &
+ 
+ 
+     !allocate(temp_first_order(n_basis,n_basis))
+-    allocate(temp_1(n_basis,n_basis))
+-    allocate(temp_M(n_basis,n_basis))
+-    allocate(temp_eigenvector(n_basis,n_basis))
++    allocate(temp_1(n_states,n_basis))
++    allocate(temp_M(n_states,n_states))
++    allocate(temp_eigenvector(n_basis,n_states))
++    Omega_MO = (0.d0,0.d0)
+     
+     do i_spin = 1, n_spin
+     i_k_task = 0
+@@ -93,7 +94,7 @@ subroutine evaluate_omega( &
+ 
+             if (real_eigenvectors) then
+                     temp_eigenvector(:,:)=          &
+-                    cmplx(KS_eigenvector(:,:,i_spin,i_k_task))
++                    cmplx(KS_eigenvector(:,:,i_spin,i_k_task),kind=kind(1.d0))
+             else
+                     temp_eigenvector(:,:)=          &
+                     !dconjg(KS_eigenvector_complex(:,:,1,i_k_task))
+@@ -104,7 +105,7 @@ subroutine evaluate_omega( &
+         ! temp_first_order(1:n_basis,1:n_basis)=          &
+             !momentum_matrix(1:n_basis,1:n_basis,i_k_task)
+ 
+-            temp_1(1:n_basis,1:n_basis)=(0.0d0,0.0d0)
++            temp_1 = (0.0d0,0.0d0)
+         
+             CALL zgemm("C","N",n_states,n_basis,n_basis,&
+                     !one, temp_eigenvector, n_basis,temp_first_order, n_basis,&
+@@ -112,7 +113,7 @@ subroutine evaluate_omega( &
+                     momentum_matrix(1:n_basis,1:n_basis,i_k_task), n_basis,&
+                     zero,temp_1,n_states)
+ 
+-            temp_M(1:n_basis,1:n_basis)=(0.0d0,0.0d0)
++            temp_M = (0.0d0,0.0d0)
+ 
+             CALL zgemm("N","N",n_states,n_states,n_basis,&
+                         one,temp_1, n_states,temp_eigenvector, n_basis,&
+@@ -275,13 +276,13 @@ subroutine evaluate_omega_scalapack( &
+ 
+                 !------real-(2) C^+ MM C  ----------------------
+                 tmp_1 = 0.0d0
+-                call pdgemm("T","N",n_basis, n_basis, n_basis, &  ! transa, transb, m, n, k
++                call pdgemm("T","N",n_states_k(my_k_point), n_basis, n_basis, &  ! transa, transb, m, n, k
+                             1.0d0, tmp_C,  1, 1, sc_desc,      &  ! alpha, a, ia, ja, desc_a
+                                     momentum_matrix_scalapack, 1, 1, sc_desc,      &  !        b, ib, jb, desc_b
+                             0.0d0, tmp_1,  1, 1, sc_desc)         ! beta,  c, ic, jc, desc_c
+ 
+                 !tmp_MM = 0.0d0
+-                call pdgemm("N","N",n_basis, n_basis, n_basis, &  ! transa, transb, m, n, k
++                call pdgemm("N","N",n_states_k(my_k_point), n_states_k(my_k_point), n_basis, &  ! transa, transb, m, n, k
+                             1.0d0, tmp_1, 1, 1, sc_desc,      &  ! alpha, a, ia, ja, desc_a
+                                     tmp_C, 1, 1, sc_desc,     &  !        b, ib, jb, desc_b
+                             0.0d0, Omega_MO_scalapack(:,:,i_spin), 1, 1, sc_desc)        ! beta,  c, ic, jc, desc_c
+@@ -336,6 +337,8 @@ subroutine evaluate_omega_scalapack( &
+                     i_global_row = my_row(i_local_row)
+                     i_global_col = my_col(i_local_col)
+ 
++                    if (i_global_row > n_states_k(my_k_point)) cycle
++                    if (i_global_col > n_states_k(my_k_point)) cycle
+                     if (i_global_row==i_global_col) cycle
+ 
+ 
+@@ -345,7 +348,7 @@ subroutine evaluate_omega_scalapack( &
+ 
+                         if (real_eigenvectors) then
+                             Omega_MO_scalapack(i_local_row,i_local_col,i_spin) =  Omega_MO_scalapack(i_local_row,i_local_col,i_spin) &
+-                                / e_diff
++                                / (-e_diff)
+                         else
+ 
+                             Omega_MO_complex_scalapack(i_local_row,i_local_col,i_spin) = Omega_MO_complex_scalapack(i_local_row,i_local_col,i_spin) &
+diff --git a/src/electric_response/evaluate_polarizability.f90 b/src/electric_response/evaluate_polarizability.f90
+index ac3d6d87..63b1862b 100644
+--- a/src/electric_response/evaluate_polarizability.f90
++++ b/src/electric_response/evaluate_polarizability.f90
+@@ -203,6 +203,8 @@ subroutine evaluate_polarizability_scalapack(homo_lumo_states,Omega_MO_scalapack
+ 
+             i_global_row = my_row(i_local_row)
+             i_global_col = my_col(i_local_col)
++            if (i_global_row > n_states_k(my_k_point)) cycle
++            if (i_global_col > n_states_k(my_k_point)) cycle
+ 
+ 
+             if (i_global_row > homo_state) cycle
+@@ -229,6 +231,8 @@ subroutine evaluate_polarizability_scalapack(homo_lumo_states,Omega_MO_scalapack
+ 
+             i_global_row = my_row(i_local_row)
+             i_global_col = my_col(i_local_col)
++            if (i_global_row > n_states_k(my_k_point)) cycle
++            if (i_global_col > n_states_k(my_k_point)) cycle
+ 
+             !if(i_global_row.le.homo_state.and.i_global_col.gt.homo_state) then
  
 diff --git a/src/elsi_wrapper.f90 b/src/elsi_wrapper.f90
 index 0ea4d128..0f4eb0dc 100644
