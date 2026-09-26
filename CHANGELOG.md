@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-26
+
 ### Added
 
 - **Collinear spin (n_spin=2) Hamiltonian support** —
@@ -528,6 +530,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial `Calculator` skeleton and ctypes binding scaffold.
 - PyPI publish workflow (GitHub Release triggered, trusted publishing).
 
+[0.2.2]: https://github.com/kYangLi/aimspy/releases/tag/v0.2.2
 [0.2.1]: https://github.com/kYangLi/aimspy/releases/tag/v0.2.1
 [0.2.0]: https://github.com/kYangLi/aimspy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kYangLi/aimspy/releases/tag/v0.1.0
