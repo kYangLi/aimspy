@@ -1,9 +1,16 @@
 name: create-release
 
 # Triggered when a release tag (v*) is pushed to this Gitea repository.
-# Creates a DRAFT Gitea Release for internal record only. Publishing it is a
-# manual, optional step (Gitea Releases do not trigger any publishing by
-# themselves; PyPI publishing happens on the public GitHub side).
+#  1) Creates a DRAFT Gitea Release for internal record (skips if it exists).
+#  2) Builds the pure-Python wheel and attaches it to that Release.
+#
+# aimspy has no compiled extensions, so the wheel is the universal
+# `py3-none-any` tag: ONE wheel covers Python 3.12-3.14. There is no need to
+# build per-minor-version wheels; the building interpreter only has to satisfy
+# `requires-python >=3.12` (we use the runner-cached 3.12).
+#
+# Publishing the Gitea Release stays a manual, optional step. Gitea Releases do
+# not trigger PyPI; PyPI publishing happens on the public GitHub side.
 on:
   push:
     tags: ['v*']
@@ -12,25 +19,75 @@ permissions:
   contents: write
 
 jobs:
-  draft:
-    name: Create draft Gitea Release
-    runs-on: ubuntu-latest
+  release:
+    name: Draft release + wheel
+    runs-on: cpu
+    timeout-minutes: 40
+    env:
+      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+      GITEA_API: https://gitea.private.thu-cmt.group/api/v1
     steps:
-      - name: Create draft release (skip if it already exists)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify tag matches pyproject version
+        env:
+          TAG: ${{ gitea.ref_name }}
+        run: |
+          set -euo pipefail
+          VER=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$TAG pyproject=$VER"
+          [ "$TAG" = "v$VER" ] || { echo "::error::tag $TAG does not match pyproject version $VER"; exit 1; }
+
+      - name: Create draft Gitea Release (or reuse existing)
         env:
           TOKEN: ${{ secrets.GITEA_TOKEN }}
           REPO: ${{ gitea.repository }}
           TAG: ${{ gitea.ref_name }}
         run: |
           set -euo pipefail
-          API="https://gitea.private.thu-cmt.group/api/v1/repos/$REPO"
-          if curl -sf -H "Authorization: token $TOKEN" "$API/releases/tags/$TAG" >/dev/null 2>&1; then
-            echo "A release for $TAG already exists; skipping."
-            exit 0
+          API="$GITEA_API/repos/$REPO"
+          RID=$(curl -sf -H "Authorization: token $TOKEN" "$API/releases/tags/$TAG" \
+                | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null || true)
+          if [ -z "$RID" ]; then
+            JSON=$(python3 -c "import json,os; t=os.environ['TAG']; print(json.dumps({'tag_name':t,'name':t,'body':f'Draft release for {t}.','draft':True,'prerelease':False}))")
+            RID=$(curl -sf -X POST -H "Authorization: token $TOKEN" -H 'Content-Type: application/json' \
+                  "$API/releases" -d "$JSON" \
+                  | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+            echo "Created draft release $TAG (id=$RID)."
+          else
+            echo "Release $TAG already exists (id=$RID); reusing."
           fi
-          BODY="Draft release for ${TAG}. Review and publish manually if desired."
-          JSON=$(jq -n --arg t "$TAG" --arg b "$BODY" \
-                 '{tag_name:$t, name:$t, body:$b, draft:true, prerelease:false}')
-          curl -sf -X POST -H "Authorization: token $TOKEN" -H 'Content-Type: application/json' \
-            "$API/releases" -d "$JSON"
-          echo "Draft release $TAG created."
+          echo "RELEASE_ID=$RID" >> "$GITHUB_ENV"
+
+      - name: Build wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip build
+          python -m build --wheel -o dist ./
+
+      - name: Attach wheel to the Gitea Release
+        env:
+          TOKEN: ${{ secrets.GITEA_TOKEN }}
+          REPO: ${{ gitea.repository }}
+        run: |
+          set -euo pipefail
+          API="$GITEA_API/repos/$REPO"
+          WHL=$(ls dist/*.whl | head -n1)
+          NAME=$(basename "$WHL")
+          export NAME
+          # Idempotent: drop an asset with the same name before re-uploading.
+          AID=$(curl -sf -H "Authorization: token $TOKEN" "$API/releases/$RELEASE_ID/assets" \
+                | python3 -c "import sys,json,os; n=os.environ['NAME']; print(next((a['id'] for a in json.load(sys.stdin) if a['name']==n), ''))" 2>/dev/null || true)
+          if [ -n "$AID" ]; then
+            curl -sf -X DELETE -H "Authorization: token $TOKEN" "$API/releases/$RELEASE_ID/assets/$AID"
+            echo "Removed existing asset $NAME (id=$AID)."
+          fi
+          curl -sf -X POST -H "Authorization: token $TOKEN" -H 'Content-Type: application/octet-stream' \
+            --data-binary @"$WHL" "$API/releases/$RELEASE_ID/assets?name=$NAME"
+          echo "Attached $NAME to release $RELEASE_ID."
