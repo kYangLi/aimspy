@@ -13,6 +13,23 @@ from aimspy.grid_data import GridData
 from aimspy.data import HARTREE_TO_EV, BOHR_TO_ANG
 
 
+def _mpi_runtime_available() -> bool:
+    """True when ``from mpi4py import MPI`` works.
+
+    ``GridData.gather`` imports mpi4py for its datatype constants even when it
+    is driven by a mock communicator, so a system MPI library is required.  Skip
+    the gather tests on hosts without one (e.g. CI runners) instead of failing.
+    """
+    try:
+        from mpi4py import MPI  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+_MPI_RUNTIME = _mpi_runtime_available()
+
+
 def _make_grid(n=5, n_spin=1, n_atoms=2, seed=0, with_structure=False):
     """Deterministic small GridData for tests (rho0 == rho_free, no 4*pi)."""
     rng = np.random.default_rng(seed)
@@ -196,6 +213,7 @@ class _FakeCommGatherv:
             recvbuf[:] = global_arr
 
 
+@pytest.mark.skipif(not _MPI_RUNTIME, reason="mpi4py MPI runtime is not available")
 class TestGather:
     def test_gather_single_rank(self):
         g = _make_grid(n=5)

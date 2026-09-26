@@ -27,7 +27,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -e .
+          python -m pip install -e ".[viz]"
           python -m pip install pytest pytest-cov
 
       - name: Run tests
