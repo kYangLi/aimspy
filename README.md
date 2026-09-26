@@ -7,6 +7,7 @@
 
 ### In-memory Python interface to FHI-aims
 
+[![CI](https://github.com/kYangLi/aimspy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kYangLi/aimspy/actions/workflows/ci.yml)
 [![GitHub Actions PyPI Release](https://github.com/kYangLi/aimspy/actions/workflows/publish.yaml/badge.svg)](https://github.com/kYangLi/aimspy/actions/workflows/publish.yaml)
 [![PyPI Version](https://img.shields.io/pypi/v/aimspy.svg)](https://pypi.org/project/aimspy/)
 [![Python 3.12–3.14](https://img.shields.io/badge/python-3.12–3.14-blue.svg)](https://www.python.org/)

@@ -1,0 +1,46 @@
+name: ci
+
+# CI on the private Gitea runner (daily development).
+# The runner container has no direct access to github.com / upstream PyPI, so
+# package downloads go through the Tsinghua mirror.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: pytest
+    runs-on: cpu
+    timeout-minutes: 50
+    env:
+      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install package and test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest pytest-cov
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          python -m pytest -q
+
+# Notes:
+# - `PIP_INDEX_URL` points pip at the Tsinghua PyPI mirror (the runner cannot
+#   reach upstream PyPI / github.com directly).
+# - Python 3.12 is used because it is pre-cached in the runner's tool cache;
+#   requesting an uncached version makes setup-python try to download from
+#   github.com, which the runner cannot reach.
+# - Do not override `container:` with slim images: actions/* need node + git, and
+#   the default runner image (ghcr.io/catthehacker/ubuntu:act-22.04) already
+#   provides them.

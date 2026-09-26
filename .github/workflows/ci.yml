@@ -1,0 +1,37 @@
+name: CI
+
+# Public test run so the repository badge reflects real CI status.
+# (Gitea also runs the same suite internally from .gitea/workflows/ci.yml.)
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install package and test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest pytest-cov
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          python -m pytest -q

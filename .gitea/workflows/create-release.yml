@@ -1,0 +1,36 @@
+name: create-release
+
+# Triggered when a release tag (v*) is pushed to this Gitea repository.
+# Creates a DRAFT Gitea Release for internal record only. Publishing it is a
+# manual, optional step (Gitea Releases do not trigger any publishing by
+# themselves; PyPI publishing happens on the public GitHub side).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    name: Create draft Gitea Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create draft release (skip if it already exists)
+        env:
+          TOKEN: ${{ secrets.GITEA_TOKEN }}
+          REPO: ${{ gitea.repository }}
+          TAG: ${{ gitea.ref_name }}
+        run: |
+          set -euo pipefail
+          API="https://gitea.private.thu-cmt.group/api/v1/repos/$REPO"
+          if curl -sf -H "Authorization: token $TOKEN" "$API/releases/tags/$TAG" >/dev/null 2>&1; then
+            echo "A release for $TAG already exists; skipping."
+            exit 0
+          fi
+          BODY="Draft release for ${TAG}. Review and publish manually if desired."
+          JSON=$(jq -n --arg t "$TAG" --arg b "$BODY" \
+                 '{tag_name:$t, name:$t, body:$b, draft:true, prerelease:false}')
+          curl -sf -X POST -H "Authorization: token $TOKEN" -H 'Content-Type: application/json' \
+            "$API/releases" -d "$JSON"
+          echo "Draft release $TAG created."
